@@ -24,7 +24,7 @@ python experiments/p0/p0.py env golden regress e0 feedback --tiny --root outputs
 - Every run is `python -m ho_fl.train` in a subprocess with the tree on `PYTHONPATH`; nothing is installed.
 - Re-running a stage reuses finished runs and repeats unfinished ones (the old attempt is kept as `<run>.stale-N`).
   Golden and regression results are stored per GPU model and torch version and are never reused across hardware.
-- E0 plans: `opt` (5 runs, seed 42), `lite` (9 runs: OPT and Qwen, seed 42), `full` (37 runs: 5 seeds for OPT,
+- E0 plans: `opt` (5 runs, seed 42), `qwen` (4 runs: Qwen2.5-1.5B on AG News, seed 42), `lite` (9 runs: OPT and Qwen, seed 42), `full` (37 runs: 5 seeds for OPT,
   3 for Qwen, in the order OPT seed 42, Qwen seed 42, remaining seeds). Reference accuracies in `p0.py` are the
   values the brief quotes from the HO-FL paper. Only directories named by the plan count towards the statistics.
 - The smoke runs of each source tree use their own cache directory (`<cache>-baseline`, `-instrumented`, `-head`),

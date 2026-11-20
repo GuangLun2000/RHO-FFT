@@ -461,7 +461,7 @@ def stage_regress(ctx):
 def e0_specs(plan, rounds):
     opt = [key for key in REFERENCE if key[0] == "opt"]
     qwen = [key for key in REFERENCE if key[0] == "qwen"]
-    tiers = {"tiny": [(opt, [42])], "opt": [(opt, [42])], "lite": [(opt, [42]), (qwen, [42])],
+    tiers = {"tiny": [(opt, [42])], "opt": [(opt, [42])], "qwen": [(qwen, [42])], "lite": [(opt, [42]), (qwen, [42])],
              "full": [(opt, [42]), (qwen, [42]), (opt, [43, 44, 45, 46]), (qwen, [43, 44])]}[plan]
     specs = []
     for groups, seeds in tiers:
@@ -926,7 +926,7 @@ def main(argv=None):
     parser.add_argument("--cache-dir", default="cache", help="download and cache directory shared by all runs")
     parser.add_argument("--mirror", default="", help="optional directory (e.g. on a mounted drive) that receives copies of finished runs")
     parser.add_argument("--tiny", action="store_true", help="dry run on CPU with synthetic tiny assets")
-    parser.add_argument("--plan", choices=["opt", "lite", "full"], default="lite", help="E0 runs to schedule")
+    parser.add_argument("--plan", choices=["opt", "qwen", "lite", "full"], default="lite", help="E0 runs to schedule")
     parser.add_argument("--rounds", type=int, default=0, help="rounds of the E0 runs (default 160; other values are not comparable with the reference)")
     parser.add_argument("--budget-hours", type=float, default=0.0, help="time budget of the e0 stage, counted from now")
     parser.add_argument("--deadline", type=float, default=0.0, help="alternative to --budget-hours: absolute deadline as a Unix timestamp")
