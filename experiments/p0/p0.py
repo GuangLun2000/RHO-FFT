@@ -924,7 +924,7 @@ def main(argv=None):
     parser.add_argument("--root", default="outputs/p0", help="directory that receives every result of the pipeline")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--cache-dir", default="cache", help="download and cache directory shared by all runs")
-    parser.add_argument("--mirror", default="", help="optional directory (e.g. on a mounted drive) that receives copies of finished runs")
+    parser.add_argument("--mirror", default="", help="optional directory that receives copies of finished runs (not used by the notebooks)")
     parser.add_argument("--tiny", action="store_true", help="dry run on CPU with synthetic tiny assets")
     parser.add_argument("--plan", choices=["opt", "qwen", "lite", "full"], default="lite", help="E0 runs to schedule")
     parser.add_argument("--rounds", type=int, default=0, help="rounds of the E0 runs (default 160; other values are not comparable with the reference)")

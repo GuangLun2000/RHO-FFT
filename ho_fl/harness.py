@@ -339,7 +339,7 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
     aside to ``<output>.stale-N``, because the entry points refuse to write into a non-empty directory. After the
     run, ``<output>/run_meta.json`` records the command, the code revision, the timing and, on failure, the end of
     the log; ``extra_meta`` is merged into it. ``mirror`` is an optional directory that receives a copy of the
-    finished run (for example on a mounted drive). Returns a record with ``status`` (``COMPLETED`` or
+    finished run. Returns a record with ``status`` (``COMPLETED`` or
     ``FAILED``), ``reused`` and the timing.
     """
     output = Path(output).resolve()
