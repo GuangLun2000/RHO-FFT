@@ -19,8 +19,11 @@ from .io import sha256
 LOG_FILES = ("rounds.jsonl", "curves.jsonl", "ledger.jsonl")
 FINGERPRINT_KEYS = ("task_loss", "selected_clients", "evaluation", "final_parameter_sha256",
                     "initial_parameter_sha256", "partition_id", "file_sha256")
-# Absolute tolerance of replay.py, used for invariant I1 when a device is not bitwise reproducible.
+# Largest absolute difference between final states accepted for invariant I1 when a device is not bitwise
+# reproducible. It is the absolute part of replay.py's tolerance (replay.py also allows a relative 1e-5).
 STATE_TOLERANCE = 1e-7
+# Written last into a mirrored run directory; a mirror copy without it is incomplete and is never restored.
+MIRROR_MARKER = ".mirror-complete"
 
 
 # --- reading run directories ---------------------------------------------------------------------------------------
@@ -137,7 +140,10 @@ def compare_fingerprints(reference, candidate):
     reference_files, candidate_files = reference.get("file_sha256") or {}, candidate.get("file_sha256") or {}
     files_identical = {name: reference_files.get(name) is not None and reference_files.get(name) == candidate_files.get(name)
                        for name in LOG_FILES}
+    shape_equal = (len(reference["task_loss"]) == len(candidate["task_loss"]) > 0
+                   and len(reference["evaluation"]) == len(candidate["evaluation"]))
     return {"rounds_equal": rounds_equal, "selection_equal": selection_equal, "evaluation_equal": evaluation_equal,
+            "shape_equal": shape_equal,
             "same_start": same_start, "hash_equal": hash_equal, "files_identical": files_identical,
             "max_abs_task_loss_diff": loss_diff, "max_abs_evaluation_diff": eval_diff,
             "bitwise": bool(rounds_equal and selection_equal and evaluation_equal and same_start and hash_equal is not False),
@@ -289,8 +295,31 @@ def tail(path, lines=40):
     return "\n".join(path.read_text(errors="replace").splitlines()[-lines:])
 
 
+def mirror_run(output, mirror, echo=print):
+    """Copy a finished run directory and its log to ``mirror``. Errors are reported, never raised.
+
+    The marker file is removed first and written last, so an interrupted copy is recognisable.
+    """
+    output, mirror = Path(output), Path(mirror)
+    try:
+        (mirror / MIRROR_MARKER).unlink(missing_ok=True)
+        shutil.copytree(output, mirror, dirs_exist_ok=True)
+        log = output.with_name(output.name + ".log")
+        if log.exists():
+            shutil.copy2(log, mirror.with_name(mirror.name + ".log"))
+        (mirror / MIRROR_MARKER).write_text(datetime.now(timezone.utc).isoformat(timespec="seconds") + "\n")
+        return True
+    except (OSError, shutil.Error) as error:
+        echo(f"  WARNING: could not mirror {output.name} to {mirror}: {error!r}")
+        return False
+
+
 def _set_aside(output):
     """Move an unfinished attempt out of the way; it is kept because failed runs are part of the record."""
+    if not (output / "run_meta.json").exists():
+        status = read_json(output / "status.json") or {}
+        write_json(output / "run_meta.json", {"label": output.name, "status": "INTERRUPTED",
+                                              "last_completed_round": status.get("last_completed_round")})
     index = 1
     while output.with_name(f"{output.name}.stale-{index}").exists():
         index += 1
@@ -303,14 +332,15 @@ def _set_aside(output):
 
 
 def run_training(fields, output, tree=".", module="ho_fl.train", label=None, revision=None, mirror=None,
-                 python=None, progress_every=10, echo=print):
+                 python=None, progress_every=10, echo=print, extra_meta=None):
     """Run one entry point of the package in a subprocess of ``tree``, unless ``output`` holds a finished run.
 
     ``fields`` are config fields; ``output`` is added to them. An unfinished or failed earlier attempt is moved
     aside to ``<output>.stale-N``, because the entry points refuse to write into a non-empty directory. After the
     run, ``<output>/run_meta.json`` records the command, the code revision, the timing and, on failure, the end of
-    the log. ``mirror`` is an optional directory that receives a copy of the finished run (for example on a
-    mounted drive). Returns a record with ``status`` (``COMPLETED`` or ``FAILED``), ``reused`` and the timing.
+    the log; ``extra_meta`` is merged into it. ``mirror`` is an optional directory that receives a copy of the
+    finished run (for example on a mounted drive). Returns a record with ``status`` (``COMPLETED`` or
+    ``FAILED``), ``reused`` and the timing.
     """
     output = Path(output).resolve()
     label = label or output.name
@@ -319,10 +349,15 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
     if status == "COMPLETED":
         meta = read_json(output / "run_meta.json") or {}
         echo(f"  [{label}] already completed, reusing {output}")
+        if mirror is not None and not (Path(mirror) / MIRROR_MARKER).exists():
+            mirror_run(output, mirror, echo)
         return {"label": label, "output": str(output), "status": "COMPLETED", "reused": True,
                 "wall_s": meta.get("wall_s"), "timing": meta.get("timing"), "revision": meta.get("revision")}
     if output.exists() and any(output.iterdir()):
-        echo(f"  [{label}] unfinished attempt ({status}) moved to {_set_aside(output).name}")
+        stale = _set_aside(output)
+        echo(f"  [{label}] unfinished attempt ({status}) moved to {stale.name}")
+        if mirror is not None:
+            mirror_run(stale, Path(mirror).with_name(stale.name), echo)
     command = [python or sys.executable, "-m", module, *cli({**fields, "output": str(output)})]
     echo(f"  [{label}] starting: {' '.join(command[2:])}")
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -331,7 +366,7 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
     status = run_status(output, module)
     if status != "COMPLETED":
         status = "FAILED"
-    meta = {"label": label, "module": module, "command": command, "tree": str(Path(tree).resolve()),
+    meta = {**(extra_meta or {}), "label": label, "module": module, "command": command, "tree": str(Path(tree).resolve()),
             "revision": revision, "started_at": started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "returncode": progress["returncode"], "wall_s": progress["wall_s"], "status": status,
@@ -343,10 +378,7 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
     output.mkdir(parents=True, exist_ok=True)
     write_json(output / "run_meta.json", meta)
     if mirror is not None:
-        target = Path(mirror)
-        shutil.copytree(output, target, dirs_exist_ok=True)
-        if log_path.exists():
-            shutil.copy2(log_path, target.with_name(target.name + ".log"))
+        mirror_run(output, mirror, echo)
     if status == "COMPLETED":
         echo(f"  [{label}] completed in {progress['wall_s']:.0f}s")
     else:

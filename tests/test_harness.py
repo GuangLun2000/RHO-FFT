@@ -39,7 +39,7 @@ def make_fingerprint(**changes):
 
 def test_identical_fingerprints_are_bitwise_equal():
     result = harness.compare_fingerprints(make_fingerprint(), make_fingerprint())
-    assert result["bitwise"] and result["hash_equal"] and all(result["files_identical"].values())
+    assert result["bitwise"] and result["hash_equal"] and result["shape_equal"] and all(result["files_identical"].values())
     assert result["differences"] == [] and result["max_abs_task_loss_diff"] == 0.0
 
 
@@ -99,23 +99,32 @@ def test_run_training_runs_reuses_sets_aside_and_reports_failures(tiny_root, tmp
     fields = {**build_tiny_assets(tiny_root)["sst2"], "rounds": 2, "evaluate_every": 2, "k": 2, "E": 1, "save_state_rounds": "2"}
     messages = []
     output = tmp_path / "work" / "run"
-    record = harness.run_training(fields, output, tree=REPO, mirror=tmp_path / "mirror" / "run", revision="abc", echo=messages.append)
+    record = harness.run_training(fields, output, tree=REPO, mirror=tmp_path / "mirror" / "run", revision="abc", echo=messages.append,
+                                  extra_meta={"hardware": "cpu-test"})
     assert record["status"] == "COMPLETED" and not record["reused"] and record["timing"]["rounds_measured"] == 2
     meta = harness.read_json(output / "run_meta.json")
     assert meta["status"] == "COMPLETED" and meta["revision"] == "abc" and set(meta["round_times"]) == {"1", "2"}
+    assert meta["hardware"] == "cpu-test"
     assert (tmp_path / "mirror" / "run" / "summary.json").exists() and (tmp_path / "mirror" / "run.log").exists()
+    assert (tmp_path / "mirror" / "run" / harness.MIRROR_MARKER).exists()
     fingerprint = harness.fingerprint(output)
     assert len(fingerprint["task_loss"]) == 2 and fingerprint["final_parameter_sha256"]
     assert harness.compare_fingerprints(fingerprint, harness.fingerprint(tmp_path / "mirror" / "run"))["bitwise"]
 
-    again = harness.run_training(fields, output, tree=REPO, echo=messages.append)
+    again = harness.run_training(fields, output, tree=REPO, mirror=tmp_path / "late-mirror" / "run", echo=messages.append)
     assert again["reused"] and again["status"] == "COMPLETED" and again["timing"] == record["timing"]
+    # A reused run that the mirror does not hold yet is copied there as a whole.
+    assert (tmp_path / "late-mirror" / "run" / "rounds.jsonl").exists() and (tmp_path / "late-mirror" / "run" / harness.MIRROR_MARKER).exists()
 
     interrupted = tmp_path / "work" / "interrupted"
     harness.write_json(interrupted / "status.json", {"status": "RUNNING", "last_completed_round": 1})
-    failed = harness.run_training({**fields, "method": "no_such_method"}, interrupted, tree=REPO, echo=messages.append)
+    failed = harness.run_training({**fields, "method": "no_such_method"}, interrupted, tree=REPO, echo=messages.append,
+                                  mirror=tmp_path / "mirror" / "interrupted")
     assert failed["status"] == "FAILED" and "Unsupported method" in failed["log_tail"]
     assert (tmp_path / "work" / "interrupted.stale-1" / "status.json").exists()
+    # The interrupted attempt stays on record, locally and in the mirror.
+    assert harness.read_json(tmp_path / "mirror" / "interrupted.stale-1" / "run_meta.json")["status"] == "INTERRUPTED"
+    assert harness.read_json(tmp_path / "mirror" / "interrupted" / "run_meta.json")["status"] == "FAILED"
     assert harness.read_json(interrupted / "run_meta.json")["status"] == "FAILED"
     retried = harness.run_training(fields, interrupted, tree=REPO, echo=messages.append)
     assert retried["status"] == "COMPLETED" and (tmp_path / "work" / "interrupted.stale-2" / "run_meta.json").exists()
