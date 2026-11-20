@@ -30,7 +30,7 @@ ho-fl-replay = "ho_fl.replay:main"
 include = ["ho_fl*"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4"]
+dev = ["pytest>=7.4,<10"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
