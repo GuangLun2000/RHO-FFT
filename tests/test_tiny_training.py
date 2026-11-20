@@ -180,7 +180,7 @@ def test_train_client_report_records_what_the_client_did(tiny_config):
     assert any(report.delta[name].abs().max() > 0 for name in state)
     # Only this client's data stream advanced, and a cut other than the client's own is refused before anything runs.
     assert [stream.batches_seen for stream in streams] == [cfg.E if index == cid else 0 for index in range(cfg.n)]
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError):
         train_client(b, state, streams, 1, cid, 99)
     assert streams[cid].batches_seen == cfg.E
 

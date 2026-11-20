@@ -43,6 +43,17 @@ class Config:
     local_files_only: bool = False
     save_state_rounds: str = ""
     init_state: str = ""
+    zo_mode: str = "on"
+    server_lr: float = 1.0
+    agg_electorate: str = "all"
+    agg_weight: str = "cohort"
+    fo_quorum: int = 1
+    thin_policy: str = "all"
+    tier_quota: str = ""
+    in_tier: str = "rotate"
+    rotate_window: int = 20
+    layer_stats: bool = False
+    probe_rounds: str = ""
 
     @property
     def betas(self):
@@ -62,7 +73,31 @@ class Config:
 
     @property
     def method_label(self):
-        return f"HO-FL (\u03b2={self.beta:g})" if self.method == "hofl" else {"fedavg": "FedAvg", "fedprox": "FedProx", "decomfl": "DeComFL-AdamW"}[self.method]
+        return (f"HO-FL (\u03b2={self.beta:g})" if self.method == "hofl" else {"fedavg": "FedAvg", "fedprox": "FedProx", "decomfl": "DeComFL-AdamW"}[self.method]) + self.variant_label
+
+    @property
+    def aggregation_name(self):
+        """Name of the aggregation configuration in the table of the brief, or a spelled-out description."""
+        for name, fields in NAMED_AGGREGATIONS.items():
+            if all(getattr(self, key) == value for key, value in fields.items()):
+                return name
+        return f"agg={self.agg_electorate}/{self.agg_weight}/quorum{self.fo_quorum}/{self.thin_policy}"
+
+    @property
+    def variant_label(self):
+        """Suffix that names every setting that changes the algorithm; empty for the upstream configuration."""
+        parts = []
+        if self.sampler == "tier_equalised":
+            parts.append("tier_equalised")
+        if self.sampler == "tier_quota":
+            parts.append(f"tier_quota {self.tier_quota} {self.in_tier}")
+        if self.aggregation_name != "mean_all":
+            parts.append(self.aggregation_name)
+        if self.zo_mode != "on":
+            parts.append(f"zo={self.zo_mode}")
+        if self.server_lr != 1.0:
+            parts.append(f"server_lr={self.server_lr:g}")
+        return f" [{', '.join(parts)}]" if parts else ""
 
     def resolve(self):
         if self.model not in SPECS or self.dataset not in {"sst2", "boolq", "sciq", "ag_news", "squad"}:
@@ -79,15 +114,46 @@ class Config:
             self.beta = 0.0
         if self.sampler == "auto":
             self.sampler = "dep_round_v1"
-        if self.sampler not in {"dep_round_v1", "historical_torch", "historical_numpy_uniform"}:
+        if self.sampler not in {"dep_round_v1", "historical_torch", "historical_numpy_uniform", "tier_equalised", "tier_quota"}:
             raise ValueError("Unsupported sampler")
-        if self.beta and self.sampler != "dep_round_v1":
+        if self.sampler == "tier_quota":
+            self.beta = 0.0
+        if self.beta and self.sampler not in {"dep_round_v1", "tier_equalised"}:
             raise ValueError("Resource-preference sampling requires DepRound")
         if self.evaluate_every == 0:
             self.evaluate_every = max(1, 50 // self.E)
         if any(not 1 <= r <= self.rounds for r in parse_rounds(self.save_state_rounds)):
             raise ValueError("save_state_rounds must lie in [1, rounds]")
+        if self.zo_mode not in {"on", "off"} or (self.zo_mode == "off" and self.method != "hofl"):
+            raise ValueError("zo_mode is on or off; off is only defined for method hofl")
+        if self.server_lr <= 0 or self.fo_quorum < 1:
+            raise ValueError("server_lr must be positive and fo_quorum at least 1")
+        if self.agg_electorate not in {"all", "fo"} or self.agg_weight not in {"cohort", "count"} or self.thin_policy not in {"all", "dilute", "hold"}:
+            raise ValueError("Unsupported aggregation setting")
+        quota = parse_quota(self.tier_quota)
+        if (self.sampler == "tier_quota") != bool(quota):
+            raise ValueError("tier_quota is required by, and only used with, sampler tier_quota")
+        if quota and (len(quota) != 3 or sum(quota) != self.k or not all(0 <= count <= self.n // 3 for count in quota)):
+            raise ValueError("tier_quota needs three counts for T1,T2,T3 that sum to k")
+        if self.in_tier not in {"rotate", "random", "fixed"} or self.rotate_window < 1:
+            raise ValueError("Unsupported in_tier rule or rotate_window")
+        if any(not 1 <= r <= self.rounds for r in parse_rounds(self.probe_rounds)):
+            raise ValueError("probe_rounds must lie in [1, rounds]")
+        if (self.layer_stats or self.probe_rounds.strip()) and self.dataset == "squad":
+            raise ValueError("Probes are defined for the classification datasets only")
         return self
+
+
+# The aggregation configurations of the brief (section 6.4) that are implemented so far, as config fields.
+NAMED_AGGREGATIONS = {
+    "mean_all": {"agg_electorate": "all", "agg_weight": "cohort"},
+    "fo_mean": {"agg_electorate": "fo", "agg_weight": "count", "fo_quorum": 1, "thin_policy": "all"},
+    "fo_diluted": {"agg_electorate": "fo", "agg_weight": "cohort", "fo_quorum": 1, "thin_policy": "all"},
+}
+
+
+def parse_quota(text):
+    return [int(part) for part in text.split(",") if part.strip()]
 
 
 def parse_rounds(text):

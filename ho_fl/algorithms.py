@@ -21,7 +21,7 @@ def perturb(params, snapshot, directions, scale):
     for name, param in params.items():
         param.copy_(snapshot[name]).add_(directions[name], alpha=scale)
 
-def hybrid_step(cfg, wrapper, params, prefix, batch, tokens, optimizer, directions, local_step):
+def hybrid_step(cfg, wrapper, params, prefix, batch, tokens, optimizer, directions, local_step, *, zo=True):
     optimizer.zero_grad(set_to_none=True)
     p_count, mu = (cfg.q, cfg.mu)
     zo_params = prefix
@@ -37,7 +37,7 @@ def hybrid_step(cfg, wrapper, params, prefix, batch, tokens, optimizer, directio
     loss.backward()
     lam = h_cut.grad.detach().float()
     assert lam is not None
-    for p in range(p_count):
+    for p in range(p_count if zo else 0):
         u = directions.get(zo_params, local_step, p)
         try:
             with torch.no_grad():
@@ -49,7 +49,7 @@ def hybrid_step(cfg, wrapper, params, prefix, batch, tokens, optimizer, directio
                     accum[name].add_(u[name] * (v / (p_count * mu)))
         finally:
             restore(zo_params, snapshot, False)
-    for name, param in zo_params.items():
+    for name, param in (zo_params.items() if zo else ()):
         param.grad = accum[name]
     optimizer.step()
     return (loss.detach(), scalars)

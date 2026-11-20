@@ -15,7 +15,9 @@ UPSTREAM_DEFAULTS = {
     "num_threads": 4, "eval_batch_size": 64, "evaluate_every": 0, "local_files_only": False,
 }
 # Options added by RHO-FFT, with the value that keeps the upstream behaviour. Register every new field here.
-NEW_DEFAULTS = {"save_state_rounds": "", "init_state": ""}
+NEW_DEFAULTS = {"save_state_rounds": "", "init_state": "", "zo_mode": "on", "server_lr": 1.0, "agg_electorate": "all",
+                "agg_weight": "cohort", "fo_quorum": 1, "thin_policy": "all", "tier_quota": "", "in_tier": "rotate",
+                "rotate_window": 20, "layer_stats": False, "probe_rounds": ""}
 
 
 def test_defaults_are_the_upstream_defaults_plus_registered_new_fields():
@@ -74,3 +76,33 @@ def test_parse_config_rejects_unknown_fields(tmp_path):
     path.write_text(json.dumps({"no_such_field": 1}))
     with pytest.raises(ValueError):
         parse_config(["--config", str(path)])
+
+
+@pytest.mark.parametrize("fields", [
+    {"zo_mode": "half"}, {"zo_mode": "off", "method": "fedavg"}, {"server_lr": 0.0}, {"fo_quorum": 0},
+    {"agg_electorate": "robust"}, {"agg_weight": "mean"}, {"thin_policy": "drop"},
+    {"sampler": "tier_quota", "tier_quota": "3,1"}, {"sampler": "tier_quota", "tier_quota": "3,2,2"},
+    {"sampler": "tier_quota", "tier_quota": "3,1,x"}, {"sampler": "tier_quota", "tier_quota": "11,0,0", "k": 11},
+    {"tier_quota": "3,1,2"},  # a quota without the sampler that uses it
+    {"sampler": "tier_quota", "tier_quota": "3,1,2", "in_tier": "round_robin"}, {"rotate_window": 0},
+    {"probe_rounds": "0"}, {"probe_rounds": "161"}, {"dataset": "squad", "layer_stats": True},
+    {"dataset": "squad", "probe_rounds": "1"},
+])
+def test_resolve_rejects_invalid_new_settings(fields):
+    with pytest.raises(ValueError):
+        Config(**fields).resolve()
+
+
+def test_new_samplers_and_labels():
+    quota = Config(sampler="tier_quota", tier_quota="3,1,2").resolve()
+    assert quota.beta == 0.0 and quota.method_label == "HO-FL (β=0) [tier_quota 3,1,2 rotate]"
+    assert Config(sampler="tier_equalised").resolve().method_label == "HO-FL (β=0.75) [tier_equalised]"
+    assert Config(sampler="tier_equalised").resolve().resolve().beta == 0.75  # resolve() is idempotent
+    arm_c = Config(beta=0.0, agg_electorate="fo", agg_weight="count").resolve()
+    assert arm_c.aggregation_name == "fo_mean" and arm_c.method_label == "HO-FL (β=0) [fo_mean]"
+    arm_b = Config(agg_electorate="fo", zo_mode="off").resolve()
+    assert arm_b.aggregation_name == "fo_diluted" and arm_b.method_label == "HO-FL (β=0.75) [fo_diluted, zo=off]"
+    assert Config(server_lr=3.0).resolve().method_label == "HO-FL (β=0.75) [server_lr=3]"
+    odd = Config(agg_electorate="fo", fo_quorum=3, thin_policy="hold").resolve()
+    assert odd.aggregation_name == "agg=fo/cohort/quorum3/hold"
+    assert Config(method="fedavg").resolve().variant_label == "" and Config().aggregation_name == "mean_all"

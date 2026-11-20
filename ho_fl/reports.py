@@ -23,6 +23,7 @@ class ClientReport:
     losses: list                # per local step, the detached task loss
     direction_master_seed: int
     fault: str = None
+    zo: bool = True             # whether the zeroth-order update was executed (zo_mode); if not, layers below the cut did not move
 
     @property
     def train_loss(self):

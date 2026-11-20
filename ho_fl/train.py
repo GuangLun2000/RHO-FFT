@@ -11,14 +11,16 @@ from .algorithms import hybrid_step, optimizer_for, restore, task_loss
 from .batches import ClientStream, collate, collate_answers
 from .classification import evaluate as classification_evaluate
 from .config import SPECS, parse_config, parse_rounds
+from .costs import BACKWARD_RATIO, forward_equivalents
 from .data import load_manifest, load_tokens
 from .decomfl import CentralEstimator, local_step as decomfl_step
 from .io import append_jsonl, sha256, tensor_hash, write_json
 from .model import load_model, partition_parameters
+from .probes import Probes
 from .randomness import client_directions
 from .reports import ClientReport
 from .sampling import DepRoundSampler
-from .scheduling import LegacyScheduler
+from .scheduling import make_scheduler
 from .states import load_state, save_state, state_path
 
 
@@ -39,7 +41,7 @@ class Backend:
     def optimizer(self, params=None):
         return optimizer_for(self.params if params is None else params, self.cfg)
 
-    def local_step(self, cid, indices, optimizer, directions, e, reference):
+    def local_step(self, cid, indices, optimizer, directions, e, reference, *, cut=None, zo=True):
         cfg = self.cfg
         if cfg.dataset == "squad":
             from .squad import AnswerLossWrapper
@@ -61,7 +63,7 @@ class Backend:
             return raw.detach(), []
         if cfg.method == "decomfl":
             return decomfl_step(self.estimator, wrapper, batch, tokens, optimizer, directions, e)
-        return hybrid_step(cfg, wrapper, self.params, self.bottoms[self.cuts[cid]], batch, tokens, optimizer, directions, e)
+        return hybrid_step(cfg, wrapper, self.params, self.bottoms[self.cuts[cid] if cut is None else cut], batch, tokens, optimizer, directions, e, zo=zo)
 
     def evaluate(self, round_id, final):
         cfg = self.cfg
@@ -96,8 +98,8 @@ class Sampler:
         return self.dr.sample()
 
 
-def logical_uplink(cfg, total, bottom):
-    scalar_bytes = 4 * cfg.E * cfg.q if cfg.method in {"hofl", "decomfl"} else 0
+def logical_uplink(cfg, total, bottom, zo=True):
+    scalar_bytes = 4 * cfg.E * cfg.q if zo and cfg.method in {"hofl", "decomfl"} else 0
     delta_bytes = 4 * (total - bottom)
     return {"header_bytes": 18, "zo_scalar_bytes": scalar_bytes, "fo_delta_bytes": delta_bytes,
             "logical_uplink_bytes": 18 + scalar_bytes + delta_bytes,
@@ -109,17 +111,21 @@ def train_client(b, state, streams, r, cid, cut):
 
     This is the inner loop of the upstream ``run``: directions, restore, fresh optimizer, E local steps, then the
     difference to ``state``. It advances ``streams[cid]`` and leaves the client's parameters in ``b.params``.
+
+    ``cut`` is the cut the client trains with. It may differ from the client's own cut only for method hofl and
+    only among the cuts of the model's tiers (a device of one tier then behaves like a device of another).
     """
     cfg = b.cfg
-    if cut != b.cuts[cid]:
-        raise NotImplementedError("Cut overrides are not supported yet")
+    if cut != b.cuts[cid] and (cfg.method != "hofl" or cut not in b.bottoms):
+        raise ValueError(f"Cut {cut} cannot be used by client {cid}")
+    zo = cfg.zo_mode == "on"
     directions = client_directions(cfg.seed, cfg.model, r, cid)
     restore(b.params, state)
     optimizer = b.optimizer()
     losses, scalars, batches = [], [], []
     for e in range(cfg.E):
         indices = streams[cid].next()
-        loss, step_scalars = b.local_step(cid, indices, optimizer, directions, e, state)
+        loss, step_scalars = b.local_step(cid, indices, optimizer, directions, e, state, cut=cut, zo=zo)
         losses.append(loss)
         scalars.append(step_scalars)
         batches.append(indices)
@@ -127,7 +133,7 @@ def train_client(b, state, streams, r, cid, cut):
         delta = {name: param.detach() - state[name] for name, param in b.params.items()}
     return ClientReport(cid=cid, round=r, cut=cut, tier=SPECS[cfg.model][3].index(b.resource_cuts[cid]),
                         delta=delta, scalars=scalars, batches=batches, losses=losses,
-                        direction_master_seed=directions.master_seed)
+                        direction_master_seed=directions.master_seed, zo=zo)
 
 
 def run(cfg):
@@ -140,16 +146,18 @@ def run(cfg):
     try:
         b = Backend(cfg)
         sampler = Sampler(cfg, b)
-        scheduler = LegacyScheduler(sampler, b.cuts)
+        scheduler = make_scheduler(cfg, b.cuts, b.resource_cuts, sampler)
+        probes = Probes(cfg, out)
         config = {**asdict(cfg), "method_label": cfg.method_label, "partition_id": b.partition_id,
                   "initial_parameter_sha256": b.initial_hash, "resource_cuts": b.resource_cuts,
                   "actual_cuts": b.cuts, "bottom_dimensions": b.dimensions,
-                  "sampler_metadata": sampler.dr.metadata(), "server_aggregation": "dense_mean_delta",
+                  "sampler_metadata": scheduler.metadata(), "server_aggregation": "dense_mean_delta",
                   "backbone_dtype": "bfloat16", "adapter_dtype": "float32", "lora_rank": 8,
                   "lora_alpha": 16, "lora_dropout": 0, "betas": cfg.betas,
                   "optimizer_reset": "client_participation", "model_revision": SPECS[cfg.model][1],
                   "direction_seed_scheme": "stable_seed(seed, model, round, client_id, 'zo_master')",
                   "torch_version": torch.__version__, "cuda_version": torch.version.cuda}
+        config.update(aggregation=cfg.aggregation_name, cost_model={"unit": "forward_equivalent", "backward_ratio": BACKWARD_RATIO})
         write_json(out / "config.json", config)
         (out / "manifest.json.gz").write_bytes(gzip.compress(b.manifest_bytes, mtime=0))
         state = {n: p.detach().clone() for n, p in b.params.items()}
@@ -187,18 +195,23 @@ def run(cfg):
             for cid in selected:
                 report = train_client(b, state, streams, r, cid, plan.cut(cid))
                 reports.append(report)
-                counts = logical_uplink(cfg, total, b.dimensions[b.cuts[cid]])
+                counts = logical_uplink(cfg, total, b.dimensions[report.cut], zo=report.zo)
                 cumulative += counts["logical_uplink_bytes"]
                 p = scheduler.probability(cid)
-                append_jsonl(out / "ledger.jsonl", {"round": r, "client": cid, "cut": b.cuts[cid],
-                             "resource_cut": b.resource_cuts[cid], "d_ZO": b.dimensions[b.cuts[cid]],
+                append_jsonl(out / "ledger.jsonl", {"round": r, "client": cid, "cut": report.cut,
+                             "resource_cut": b.resource_cuts[cid], "d_ZO": b.dimensions[report.cut],
                              "direction_master_seed": report.direction_master_seed if cfg.method in {"hofl", "decomfl"} else None,
-                             "p": p, "inclusion_probability": cfg.k * p, **counts})
+                             "p": p, "inclusion_probability": cfg.k * p, **counts,
+                             "tier": report.tier, "fault": report.fault,
+                             "forward_equivalents": forward_equivalents(cfg.method, cut=report.cut, depth=SPECS[cfg.model][2],
+                                                                        E=cfg.E, q=cfg.q, zo=report.zo)})
             # Arrivals: every report is on time until deadlines are modelled.
             arrivals = None
             # Aggregation, then the server step on the global state.
             update, _ = aggregate(reports, arrivals, cfg)
-            apply_update(state, update)
+            # Read-only probes: they see the reports and the update before the state changes.
+            probes.run(r, b, state, reports, arrivals, update)
+            apply_update(state, update, cfg.server_lr)
             restore(b.params, state)
             scheduler.observe(r, arrivals)
             if b.estimator is not None:
