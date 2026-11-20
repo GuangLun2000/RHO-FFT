@@ -34,6 +34,7 @@ def test_smoke_configurations_are_those_of_the_brief():
 def test_e0_plans():
     lite, full, opt = p0.e0_specs("lite", 160), p0.e0_specs("full", 160), p0.e0_specs("opt", 160)
     assert (len(opt), len(lite), len(full)) == (5, 9, 37)
+    assert [s["name"] for s in p0.e0_specs("qwen", 160)] == [s["name"] for s in lite[5:]]
     assert len({s["name"] for s in full}) == 37
     assert [s["name"] for s in full[:9]] == [s["name"] for s in lite]
     first = lite[0]
