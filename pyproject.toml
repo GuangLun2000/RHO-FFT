@@ -28,3 +28,14 @@ ho-fl-replay = "ho_fl.replay:main"
 
 [tool.setuptools.packages.find]
 include = ["ho_fl*"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-m 'not gpu'"
+markers = [
+  "gpu: needs a CUDA GPU and the real models; select with `pytest -m gpu`",
+]
