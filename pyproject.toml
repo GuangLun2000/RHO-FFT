@@ -25,6 +25,7 @@ ho-fl-train = "ho_fl.train:main"
 ho-fl-profile = "ho_fl.profile:main"
 ho-fl-memory = "ho_fl.memory:main"
 ho-fl-replay = "ho_fl.replay:main"
+ho-fl-supply = "ho_fl.supply:main"
 
 [tool.setuptools.packages.find]
 include = ["ho_fl*"]
