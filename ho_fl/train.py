@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .aggregation import aggregate, apply as apply_update
 from .algorithms import hybrid_step, optimizer_for, restore, task_loss
 from .batches import ClientStream, collate, collate_answers
 from .classification import evaluate as classification_evaluate
@@ -15,7 +16,9 @@ from .decomfl import CentralEstimator, local_step as decomfl_step
 from .io import append_jsonl, tensor_hash, write_json
 from .model import load_model, partition_parameters
 from .randomness import client_directions
+from .reports import ClientReport
 from .sampling import DepRoundSampler
+from .scheduling import LegacyScheduler
 from .states import save_state, state_path
 
 
@@ -101,6 +104,32 @@ def logical_uplink(cfg, total, bottom):
             "accounting_scope": "logical_seed_scalar_FO_delta_not_actual_dense_server_transfer"}
 
 
+def train_client(b, state, streams, r, cid, cut):
+    """One participation of client ``cid`` in round ``r``: local training from ``state``, returned as a report.
+
+    This is the inner loop of the upstream ``run``: directions, restore, fresh optimizer, E local steps, then the
+    difference to ``state``. It advances ``streams[cid]`` and leaves the client's parameters in ``b.params``.
+    """
+    cfg = b.cfg
+    if cut != b.cuts[cid]:
+        raise NotImplementedError("Cut overrides are not supported yet")
+    directions = client_directions(cfg.seed, cfg.model, r, cid)
+    restore(b.params, state)
+    optimizer = b.optimizer()
+    losses, scalars, batches = [], [], []
+    for e in range(cfg.E):
+        indices = streams[cid].next()
+        loss, step_scalars = b.local_step(cid, indices, optimizer, directions, e, state)
+        losses.append(loss)
+        scalars.append(step_scalars)
+        batches.append(indices)
+    with torch.no_grad():
+        delta = {name: param.detach() - state[name] for name, param in b.params.items()}
+    return ClientReport(cid=cid, round=r, cut=cut, tier=SPECS[cfg.model][3].index(b.resource_cuts[cid]),
+                        delta=delta, scalars=scalars, batches=batches, losses=losses,
+                        direction_master_seed=directions.master_seed)
+
+
 def run(cfg):
     out = Path(cfg.output)
     if out.exists() and any(out.iterdir()):
@@ -111,6 +140,7 @@ def run(cfg):
     try:
         b = Backend(cfg)
         sampler = Sampler(cfg, b)
+        scheduler = LegacyScheduler(sampler, b.cuts)
         config = {**asdict(cfg), "method_label": cfg.method_label, "partition_id": b.partition_id,
                   "initial_parameter_sha256": b.initial_hash, "resource_cuts": b.resource_cuts,
                   "actual_cuts": b.cuts, "bottom_dimensions": b.dimensions,
@@ -140,35 +170,32 @@ def run(cfg):
 
         evaluate(0)
         for r in range(1, cfg.rounds + 1):
-            selected = sampler.sample()
-            delta_sum = {n: torch.zeros_like(p) for n, p in b.params.items()}
-            losses = []
+            # Schedule: the cohort of this round, in the order the sampler returned it.
+            plan = scheduler.sample(r)
+            selected = plan.clients
+            # Local training: one report per client.
+            reports = []
             for cid in selected:
-                directions = client_directions(cfg.seed, cfg.model, r, cid)
-                restore(b.params, state)
-                optimizer = b.optimizer()
-                for e in range(cfg.E):
-                    loss, scalars = b.local_step(cid, streams[cid].next(), optimizer, directions, e, state)
-                    losses.append(loss)
-                with torch.no_grad():
-                    for name, param in b.params.items():
-                        delta_sum[name].add_(param.detach() - state[name])
-                del optimizer, scalars
+                report = train_client(b, state, streams, r, cid, plan.cut(cid))
+                reports.append(report)
                 counts = logical_uplink(cfg, total, b.dimensions[b.cuts[cid]])
                 cumulative += counts["logical_uplink_bytes"]
-                p = float(sampler.dr.p[cid])
+                p = scheduler.probability(cid)
                 append_jsonl(out / "ledger.jsonl", {"round": r, "client": cid, "cut": b.cuts[cid],
                              "resource_cut": b.resource_cuts[cid], "d_ZO": b.dimensions[b.cuts[cid]],
-                             "direction_master_seed": directions.master_seed if cfg.method in {"hofl", "decomfl"} else None,
+                             "direction_master_seed": report.direction_master_seed if cfg.method in {"hofl", "decomfl"} else None,
                              "p": p, "inclusion_probability": cfg.k * p, **counts})
-                del directions
-            with torch.no_grad():
-                for name in state:
-                    state[name].add_(delta_sum[name], alpha=1 / cfg.k)
-                restore(b.params, state)
+            # Arrivals: every report is on time until deadlines are modelled.
+            arrivals = None
+            # Aggregation, then the server step on the global state.
+            update, _ = aggregate(reports, arrivals, cfg)
+            apply_update(state, update)
+            restore(b.params, state)
+            scheduler.observe(r, arrivals)
             if b.estimator is not None:
                 b.estimator.round_scalars.clear()
-            training_loss = torch.stack(losses).mean().item()
+            # Logging and evaluation.
+            training_loss = torch.stack([loss for report in reports for loss in report.losses]).mean().item()
             assert np.isfinite(training_loss) and all(torch.isfinite(p).all().item() for p in b.params.values())
             if r in save_rounds:
                 save_state(state_path(out, r), state, {"round": r, "seed": cfg.seed, "model": cfg.model,
@@ -180,7 +207,7 @@ def run(cfg):
             write_json(out / "status.json", status)
             if r % cfg.evaluate_every == 0 or r == cfg.rounds:
                 final = evaluate(r)
-            del delta_sum, losses
+            del reports, report, update
         summary = {"status": "COMPLETED", "method": cfg.method_label, "seed": cfg.seed,
                    "partition_id": b.partition_id, "initial_parameter_sha256": b.initial_hash, **final}
         summary["final_parameter_sha256"] = tensor_hash(state)
