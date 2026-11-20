@@ -156,7 +156,12 @@ def run(cfg):
         if cfg.init_state:
             state, loaded = load_state(cfg.init_state, state)
             restore(b.params, state)
-            write_json(out / "init_state.json", {"path": cfg.init_state, "file_sha256": sha256(cfg.init_state), **loaded})
+            matches = {"seed": loaded["metadata"].get("seed") == str(cfg.seed),
+                       "partition_id": loaded["metadata"].get("partition_id") == b.partition_id}
+            write_json(out / "init_state.json", {"path": cfg.init_state, "file_sha256": sha256(cfg.init_state),
+                                                  "matches_run": matches, **loaded})
+            if not all(matches.values()):
+                print(json.dumps({"event": "WARNING", "message": "init_state was saved by a run with another seed or partition", **matches}), flush=True)
         streams = [ClientStream(c, cfg.batch_size) for c in b.manifest["clients"]]
         total = sum(p.numel() for p in b.params.values())
         cumulative, training_loss = 0, None
@@ -215,6 +220,8 @@ def run(cfg):
         summary = {"status": "COMPLETED", "method": cfg.method_label, "seed": cfg.seed,
                    "partition_id": b.partition_id, "initial_parameter_sha256": b.initial_hash, **final}
         summary["final_parameter_sha256"] = tensor_hash(state)
+        if cfg.init_state:
+            summary["init_state_parameter_sha256"] = loaded["parameter_sha256"]
         write_json(out / "summary.json", summary)
         write_json(out / "status.json", {**status, "status": "COMPLETED"})
         return summary

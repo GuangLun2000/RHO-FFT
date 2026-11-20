@@ -9,12 +9,17 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import torch
 from safetensors import safe_open
 from safetensors.torch import load_file
 
+import ho_fl.train as train
+from ho_fl.aggregation import aggregate
+from ho_fl.batches import ClientStream
 from ho_fl.io import tensor_hash
+from ho_fl.randomness import stable_seed
 from ho_fl.replay import run as replay_run
-from ho_fl.train import Backend, run
+from ho_fl.train import Backend, run, train_client
 from legacy_loop import legacy_run
 
 LOGS = ("rounds.jsonl", "curves.jsonl", "ledger.jsonl", "manifest.json.gz")
@@ -91,7 +96,8 @@ def test_init_state_starts_from_the_saved_state(tiny_config):
     second = tiny_config("sst2", rounds=1, init_state=str(saved))
     resumed = run(second)
     record = read_json(Path(second.output) / "init_state.json")
-    assert record["parameter_sha256"] == summary["final_parameter_sha256"]
+    assert record["parameter_sha256"] == summary["final_parameter_sha256"] == resumed["init_state_parameter_sha256"]
+    assert record["matches_run"] == {"seed": True, "partition_id": True} and "init_state_parameter_sha256" not in summary
     assert record["metadata"]["round"] == "2" and record["path"] == str(saved)
     # Round 0 of the second run evaluates the loaded state: same numbers as the last evaluation of the first run.
     before, after = read_jsonl(Path(first.output) / "curves.jsonl")[-1], read_jsonl(Path(second.output) / "curves.jsonl")[0]
@@ -131,6 +137,37 @@ def test_run_matches_the_upstream_loop(case, tiny_config, monkeypatch):
     assert logs(candidate) == logs(reference)
     assert config_without_output(candidate) == config_without_output(reference)
     assert expected["final_parameter_sha256"] != expected["initial_parameter_sha256"]
+
+
+def test_equivalence_check_notices_a_changed_accumulation_order(tiny_config, monkeypatch):
+    """The final parameter hash is what exposes a changed aggregation; with a BF16 backbone the logs may not move."""
+    reference = tiny_config("sst2", rounds=3, evaluate_every=3)
+    expected = legacy_run(reference)
+    monkeypatch.setattr(train, "aggregate", lambda reports, arrivals, cfg: aggregate(reports[::-1], arrivals, cfg))
+    changed = run(replace(reference, output=reference.output + "-reversed"))
+    assert changed["final_parameter_sha256"] != expected["final_parameter_sha256"]
+
+
+def test_train_client_report_records_what_the_client_did(tiny_config):
+    cfg = tiny_config("sst2", k=2, E=3)
+    b = Backend(cfg)
+    state = {name: param.detach().clone() for name, param in b.params.items()}
+    streams = [ClientStream(client, cfg.batch_size) for client in b.manifest["clients"]]
+    cid = 7
+    report = train_client(b, state, streams, 1, cid, b.cuts[cid])
+    fresh = ClientStream(b.manifest["clients"][cid], cfg.batch_size)
+    assert report.batches == [fresh.next() for _ in range(cfg.E)]
+    assert (report.cid, report.round, report.cut, report.fault) == (cid, 1, b.cuts[cid], None)
+    assert report.tier == [3, 6, 9].index(b.resource_cuts[cid])
+    assert len(report.losses) == cfg.E and [len(step) for step in report.scalars] == [cfg.q] * cfg.E
+    assert report.direction_master_seed == stable_seed(cfg.seed, cfg.model, 1, cid, "zo_master")
+    assert all(torch.equal(report.delta[name], b.params[name].detach() - state[name]) for name in state)
+    assert any(report.delta[name].abs().max() > 0 for name in state)
+    # Only this client's data stream advanced, and a cut other than the client's own is refused before anything runs.
+    assert [stream.batches_seen for stream in streams] == [cfg.E if index == cid else 0 for index in range(cfg.n)]
+    with pytest.raises(NotImplementedError):
+        train_client(b, state, streams, 1, cid, 99)
+    assert streams[cid].batches_seen == cfg.E
 
 
 def test_replay_passes_on_the_tiny_model(tiny_config):
