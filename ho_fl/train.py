@@ -9,13 +9,14 @@ import torch
 from .algorithms import hybrid_step, optimizer_for, restore, task_loss
 from .batches import ClientStream, collate, collate_answers
 from .classification import evaluate as classification_evaluate
-from .config import SPECS, parse_config
+from .config import SPECS, parse_config, parse_rounds
 from .data import load_manifest, load_tokens
 from .decomfl import CentralEstimator, local_step as decomfl_step
 from .io import append_jsonl, tensor_hash, write_json
 from .model import load_model, partition_parameters
 from .randomness import client_directions
 from .sampling import DepRoundSampler
+from .states import save_state, state_path
 
 
 class Backend:
@@ -125,6 +126,7 @@ def run(cfg):
         streams = [ClientStream(c, cfg.batch_size) for c in b.manifest["clients"]]
         total = sum(p.numel() for p in b.params.values())
         cumulative, training_loss = 0, None
+        save_rounds = set(parse_rounds(cfg.save_state_rounds))
 
         def evaluate(r):
             rows = b.evaluate(r, r == cfg.rounds)
@@ -168,6 +170,9 @@ def run(cfg):
                 b.estimator.round_scalars.clear()
             training_loss = torch.stack(losses).mean().item()
             assert np.isfinite(training_loss) and all(torch.isfinite(p).all().item() for p in b.params.values())
+            if r in save_rounds:
+                save_state(state_path(out, r), state, {"round": r, "seed": cfg.seed, "model": cfg.model,
+                           "partition_id": b.partition_id, "initial_parameter_sha256": b.initial_hash})
             append_jsonl(out / "rounds.jsonl", {"round": r, "processed_samples": r * cfg.k * cfg.E * cfg.batch_size,
                          "selected_clients": selected, "task_loss": training_loss,
                          "processed_input_tokens": b.processed_tokens, "processed_answer_tokens": b.answer_tokens})
@@ -178,6 +183,7 @@ def run(cfg):
             del delta_sum, losses
         summary = {"status": "COMPLETED", "method": cfg.method_label, "seed": cfg.seed,
                    "partition_id": b.partition_id, "initial_parameter_sha256": b.initial_hash, **final}
+        summary["final_parameter_sha256"] = tensor_hash(state)
         write_json(out / "summary.json", summary)
         write_json(out / "status.json", {**status, "status": "COMPLETED"})
         return summary

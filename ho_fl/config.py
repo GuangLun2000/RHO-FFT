@@ -41,6 +41,7 @@ class Config:
     eval_batch_size: int = 64
     evaluate_every: int = 0
     local_files_only: bool = False
+    save_state_rounds: str = ""
 
     @property
     def betas(self):
@@ -83,7 +84,13 @@ class Config:
             raise ValueError("Resource-preference sampling requires DepRound")
         if self.evaluate_every == 0:
             self.evaluate_every = max(1, 50 // self.E)
+        if any(not 1 <= r <= self.rounds for r in parse_rounds(self.save_state_rounds)):
+            raise ValueError("save_state_rounds must lie in [1, rounds]")
         return self
+
+
+def parse_rounds(text):
+    return sorted({int(part) for part in text.split(",") if part.strip()})
 
 
 def parse_config(argv=None):
