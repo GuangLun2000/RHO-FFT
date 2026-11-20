@@ -229,11 +229,12 @@ def _describe(row):
     return " ".join(parts)
 
 
-def launch(command, output, log_path, cwd=None, env=None, label="", progress_every=10, poll=0.2, echo=print):
+def launch(command, output, log_path, cwd=None, env=None, label="", progress_every=10, poll=0.2, echo=print, stop_at=None):
     """Run ``command`` and follow ``<output>/rounds.jsonl`` and ``curves.jsonl`` while it runs.
 
     Standard output and error of the command go to ``log_path``. Returns the exit code, the wall time and the
-    times (seconds since launch) at which each round and each evaluation appeared in the logs.
+    times (seconds since launch) at which each round and each evaluation appeared in the logs. ``stop_at`` is an
+    optional ``time.time()`` value after which the command is terminated (``timed_out`` is then true).
     """
     output, log_path = Path(output), Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,23 +270,30 @@ def launch(command, output, log_path, cwd=None, env=None, label="", progress_eve
                     last_echo[0] = now
                     echo(f"    [{label}] eval @ round {row['round']}: {_describe(row)} t={elapsed:.0f}s")
 
+    def terminate(process):
+        process.terminate()
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+    timed_out = False
     with log_path.open("w") as log:
         process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT)
         try:
             while process.poll() is None:
                 time.sleep(poll)
                 drain()
+                if stop_at is not None and time.time() > stop_at:
+                    timed_out = True
+                    terminate(process)
         except BaseException:
-            process.terminate()
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            terminate(process)
             raise
         drain()
     return {"returncode": process.returncode, "wall_s": time.monotonic() - started, "round_times": round_times,
-            "eval_times": eval_times}
+            "eval_times": eval_times, "timed_out": timed_out}
 
 
 def tail(path, lines=40):
@@ -332,15 +340,15 @@ def _set_aside(output):
 
 
 def run_training(fields, output, tree=".", module="ho_fl.train", label=None, revision=None, mirror=None,
-                 python=None, progress_every=10, echo=print, extra_meta=None):
+                 python=None, progress_every=10, echo=print, extra_meta=None, stop_at=None):
     """Run one entry point of the package in a subprocess of ``tree``, unless ``output`` holds a finished run.
 
     ``fields`` are config fields; ``output`` is added to them. An unfinished or failed earlier attempt is moved
     aside to ``<output>.stale-N``, because the entry points refuse to write into a non-empty directory. After the
     run, ``<output>/run_meta.json`` records the command, the code revision, the timing and, on failure, the end of
     the log; ``extra_meta`` is merged into it. ``mirror`` is an optional directory that receives a copy of the
-    finished run (for example on a mounted drive). Returns a record with ``status`` (``COMPLETED`` or
-    ``FAILED``), ``reused`` and the timing.
+    finished run. ``stop_at`` is an optional ``time.time()`` value after which the run is terminated. Returns a
+    record with ``status`` (``COMPLETED``, ``FAILED`` or ``TIMEOUT``), ``reused`` and the timing.
     """
     output = Path(output).resolve()
     label = label or output.name
@@ -362,10 +370,10 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
     echo(f"  [{label}] starting: {' '.join(command[2:])}")
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     progress = launch(command, output, log_path, cwd=str(Path(tree).resolve()), env=tree_environment(tree),
-                      label=label, progress_every=progress_every, echo=echo)
+                      label=label, progress_every=progress_every, echo=echo, stop_at=stop_at)
     status = run_status(output, module)
     if status != "COMPLETED":
-        status = "FAILED"
+        status = "TIMEOUT" if progress["timed_out"] else "FAILED"
     meta = {**(extra_meta or {}), "label": label, "module": module, "command": command, "tree": str(Path(tree).resolve()),
             "revision": revision, "started_at": started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -382,7 +390,7 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
     if status == "COMPLETED":
         echo(f"  [{label}] completed in {progress['wall_s']:.0f}s")
     else:
-        echo(f"  [{label}] FAILED (exit code {progress['returncode']}); end of {log_path}:")
+        echo(f"  [{label}] {status} (exit code {progress['returncode']}); end of {log_path}:")
         echo("\n".join("      " + line for line in meta["log_tail"].splitlines()[-25:]))
     return {"label": label, "output": str(output), "status": status, "reused": False, "wall_s": progress["wall_s"],
             "timing": meta["timing"], "revision": revision, "returncode": progress["returncode"],

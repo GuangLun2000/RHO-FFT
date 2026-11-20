@@ -50,6 +50,22 @@ def config_without_output(cfg):
     return config
 
 
+def assert_logs_match_upstream(candidate, reference):
+    """Every key the upstream loop writes has the same value; the manifest is byte-identical.
+
+    Later milestones add keys to the logs (brief section 6.12), so rows are compared on the upstream keys.
+    """
+    for name in ("rounds.jsonl", "curves.jsonl", "ledger.jsonl"):
+        expected = read_jsonl(Path(reference.output) / name)
+        actual = read_jsonl(Path(candidate.output) / name)
+        assert len(actual) == len(expected) > 0, name
+        assert [{key: row.get(key, "<missing>") for key in old} for row, old in zip(actual, expected)] == expected, name
+    assert (Path(candidate.output) / "manifest.json.gz").read_bytes() == (Path(reference.output) / "manifest.json.gz").read_bytes()
+    expected = config_without_output(reference)
+    actual = config_without_output(candidate)
+    assert {key: actual.get(key, "<missing>") for key in expected} == expected
+
+
 def test_run_writes_the_upstream_files_and_keys(tiny_config, tmp_path):
     cfg = tiny_config("sst2", rounds=3, evaluate_every=2)
     summary = run(cfg)
@@ -134,8 +150,7 @@ def test_run_matches_the_upstream_loop(case, tiny_config, monkeypatch):
     candidate = replace(reference, output=reference.output + "-candidate")
     expected, actual = legacy_run(reference), run(candidate)
     assert actual == expected
-    assert logs(candidate) == logs(reference)
-    assert config_without_output(candidate) == config_without_output(reference)
+    assert_logs_match_upstream(candidate, reference)
     assert expected["final_parameter_sha256"] != expected["initial_parameter_sha256"]
 
 
@@ -165,7 +180,7 @@ def test_train_client_report_records_what_the_client_did(tiny_config):
     assert any(report.delta[name].abs().max() > 0 for name in state)
     # Only this client's data stream advanced, and a cut other than the client's own is refused before anything runs.
     assert [stream.batches_seen for stream in streams] == [cfg.E if index == cid else 0 for index in range(cfg.n)]
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError):
         train_client(b, state, streams, 1, cid, 99)
     assert streams[cid].batches_seen == cfg.E
 

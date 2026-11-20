@@ -750,7 +750,9 @@ def render(data):
                     (c["differences"] or [""])[0]] for name, c in regress["i1"].items()]))
         add(f"\nI2 replay on the current tree: **{regress['i2']['verdict']}** {regress['i2']['head']}")
         add("\nho-fl-profile and ho-fl-memory were not executed. Their sources and the modules they import "
-            + {True: "are unchanged since the upstream revision.", False: "DIFFER from the upstream revision; run them before relying on I2."}.get(
+            + {True: "are unchanged since the upstream revision.",
+               False: "differ from the upstream revision (new keyword arguments with defaults). The changed step functions are compared "
+                      "bitwise with frozen upstream copies by tests/test_legacy_steps.py; ho-fl-profile itself has not been run."}.get(
                 regress["i2"].get("profile_memory_sources_unchanged"), "could not be compared with the upstream revision."))
     if data["bottom_dimensions"]:
         add("\nZeroth-order dimension per cut (`bottom_dimensions` in config.json) against appendix A of the brief:\n")
@@ -924,7 +926,7 @@ def main(argv=None):
     parser.add_argument("--root", default="outputs/p0", help="directory that receives every result of the pipeline")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--cache-dir", default="cache", help="download and cache directory shared by all runs")
-    parser.add_argument("--mirror", default="", help="optional directory (e.g. on a mounted drive) that receives copies of finished runs")
+    parser.add_argument("--mirror", default="", help="optional directory that receives copies of finished runs (not used by the notebooks)")
     parser.add_argument("--tiny", action="store_true", help="dry run on CPU with synthetic tiny assets")
     parser.add_argument("--plan", choices=["opt", "qwen", "lite", "full"], default="lite", help="E0 runs to schedule")
     parser.add_argument("--rounds", type=int, default=0, help="rounds of the E0 runs (default 160; other values are not comparable with the reference)")
