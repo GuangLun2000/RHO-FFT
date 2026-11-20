@@ -1,3 +1,21 @@
+# RHO-FFT
+
+RHO-FFT (Resilient Hybrid-Order Federated Fine-Tuning) is research code built on the public HO-FL code base. It studies
+the resilience of hybrid-order federated fine-tuning: which first-order reports each layer's update comes from, and the
+scheduling, aggregation and uplink mechanisms that follow from that.
+
+- **Origin.** `ho_fl/`, `pyproject.toml` and the HO-FL section below were imported verbatim from
+  [HKU-WILL-Lab/ho-fl](https://github.com/HKU-WILL-Lab/ho-fl) at commit `ca74bed900b1af133bea2412bfdeba45447116dc`
+  (2026-09-26). HO-FL is both the baseline and the code this work extends.
+- **Baseline equivalence.** Every option added here defaults to the upstream behaviour, so `ho-fl-train` with default
+  settings is meant to reproduce the upstream results.
+- **Status.** Work in progress. Upstream ships no LICENSE file, so this repository stays private until the licensing is
+  clarified.
+
+The remainder of this file is the upstream README.
+
+---
+
 # HO-FL
 
 ## Install
