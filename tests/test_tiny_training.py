@@ -83,6 +83,23 @@ def test_saved_state_matches_the_reported_final_hash_and_saving_changes_nothing(
     assert tensor_hash({name: first[name] for name in sorted(first)}) != summary_saving["final_parameter_sha256"]
 
 
+def test_init_state_starts_from_the_saved_state(tiny_config):
+    first = tiny_config("sst2", rounds=2, save_state_rounds="2")
+    summary = run(first)
+    assert not (Path(first.output) / "init_state.json").exists()
+    saved = Path(first.output) / "states" / "round_0002.safetensors"
+    second = tiny_config("sst2", rounds=1, init_state=str(saved))
+    resumed = run(second)
+    record = read_json(Path(second.output) / "init_state.json")
+    assert record["parameter_sha256"] == summary["final_parameter_sha256"]
+    assert record["metadata"]["round"] == "2" and record["path"] == str(saved)
+    # Round 0 of the second run evaluates the loaded state: same numbers as the last evaluation of the first run.
+    before, after = read_jsonl(Path(first.output) / "curves.jsonl")[-1], read_jsonl(Path(second.output) / "curves.jsonl")[0]
+    assert (after["accuracy"], after["task_loss"]) == (before["accuracy"], before["task_loss"])
+    assert resumed["initial_parameter_sha256"] == summary["initial_parameter_sha256"]
+    assert resumed["final_parameter_sha256"] != summary["final_parameter_sha256"]
+
+
 def test_repeated_runs_are_bitwise_identical_on_cpu(tiny_config):
     first, second = tiny_config("sst2"), tiny_config("sst2")
     assert run(first) == run(second)

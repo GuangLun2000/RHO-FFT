@@ -15,7 +15,7 @@ UPSTREAM_DEFAULTS = {
     "num_threads": 4, "eval_batch_size": 64, "evaluate_every": 0, "local_files_only": False,
 }
 # Options added by RHO-FFT, with the value that keeps the upstream behaviour. Register every new field here.
-NEW_DEFAULTS = {"save_state_rounds": ""}
+NEW_DEFAULTS = {"save_state_rounds": "", "init_state": ""}
 
 
 def test_defaults_are_the_upstream_defaults_plus_registered_new_fields():

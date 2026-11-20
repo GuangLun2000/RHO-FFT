@@ -42,6 +42,7 @@ class Config:
     evaluate_every: int = 0
     local_files_only: bool = False
     save_state_rounds: str = ""
+    init_state: str = ""
 
     @property
     def betas(self):

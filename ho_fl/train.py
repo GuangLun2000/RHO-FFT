@@ -13,13 +13,13 @@ from .classification import evaluate as classification_evaluate
 from .config import SPECS, parse_config, parse_rounds
 from .data import load_manifest, load_tokens
 from .decomfl import CentralEstimator, local_step as decomfl_step
-from .io import append_jsonl, tensor_hash, write_json
+from .io import append_jsonl, sha256, tensor_hash, write_json
 from .model import load_model, partition_parameters
 from .randomness import client_directions
 from .reports import ClientReport
 from .sampling import DepRoundSampler
 from .scheduling import LegacyScheduler
-from .states import save_state, state_path
+from .states import load_state, save_state, state_path
 
 
 class Backend:
@@ -153,6 +153,10 @@ def run(cfg):
         write_json(out / "config.json", config)
         (out / "manifest.json.gz").write_bytes(gzip.compress(b.manifest_bytes, mtime=0))
         state = {n: p.detach().clone() for n, p in b.params.items()}
+        if cfg.init_state:
+            state, loaded = load_state(cfg.init_state, state)
+            restore(b.params, state)
+            write_json(out / "init_state.json", {"path": cfg.init_state, "file_sha256": sha256(cfg.init_state), **loaded})
         streams = [ClientStream(c, cfg.batch_size) for c in b.manifest["clients"]]
         total = sum(p.numel() for p in b.params.values())
         cumulative, training_loss = 0, None
