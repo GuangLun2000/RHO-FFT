@@ -58,8 +58,12 @@ def write_json(path, obj):
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n")
 
 
+# A run that ended on purpose. ``DIVERGED`` (non-finite values with on_nonfinite=stop) is a result, not a failure.
+FINISHED = ("COMPLETED", "DIVERGED")
+
+
 def run_status(path, module="ho_fl.train"):
-    """``COMPLETED``, ``FAILED``, ``RUNNING`` or ``MISSING``. Replay has no status.json; its summary decides."""
+    """``COMPLETED``, ``DIVERGED``, ``FAILED``, ``RUNNING`` or ``MISSING``. Replay has no status.json; its summary decides."""
     path = Path(path)
     if module == "ho_fl.replay":
         summary = read_json(path / "summary.json")
@@ -354,12 +358,12 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
     label = label or output.name
     log_path = output.with_name(output.name + ".log")
     status = run_status(output, module)
-    if status == "COMPLETED":
+    if status in FINISHED:
         meta = read_json(output / "run_meta.json") or {}
-        echo(f"  [{label}] already completed, reusing {output}")
+        echo(f"  [{label}] already finished ({status}), reusing {output}")
         if mirror is not None and not (Path(mirror) / MIRROR_MARKER).exists():
             mirror_run(output, mirror, echo)
-        return {"label": label, "output": str(output), "status": "COMPLETED", "reused": True,
+        return {"label": label, "output": str(output), "status": status, "reused": True,
                 "wall_s": meta.get("wall_s"), "timing": meta.get("timing"), "revision": meta.get("revision")}
     if output.exists() and any(output.iterdir()):
         stale = _set_aside(output)
@@ -372,7 +376,7 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
     progress = launch(command, output, log_path, cwd=str(Path(tree).resolve()), env=tree_environment(tree),
                       label=label, progress_every=progress_every, echo=echo, stop_at=stop_at)
     status = run_status(output, module)
-    if status != "COMPLETED":
+    if status not in FINISHED:
         status = "TIMEOUT" if progress["timed_out"] else "FAILED"
     meta = {**(extra_meta or {}), "label": label, "module": module, "command": command, "tree": str(Path(tree).resolve()),
             "revision": revision, "started_at": started_at,
@@ -380,15 +384,15 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
             "returncode": progress["returncode"], "wall_s": progress["wall_s"], "status": status,
             "round_times": progress["round_times"], "eval_times": progress["eval_times"],
             "timing": timing(progress), "log": str(log_path)}
-    if status != "COMPLETED":
+    if status not in FINISHED:
         meta["log_tail"] = tail(log_path)
         meta["error"] = (read_json(output / "status.json") or {}).get("error")
     output.mkdir(parents=True, exist_ok=True)
     write_json(output / "run_meta.json", meta)
     if mirror is not None:
         mirror_run(output, mirror, echo)
-    if status == "COMPLETED":
-        echo(f"  [{label}] completed in {progress['wall_s']:.0f}s")
+    if status in FINISHED:
+        echo(f"  [{label}] {status.lower()} in {progress['wall_s']:.0f}s")
     else:
         echo(f"  [{label}] {status} (exit code {progress['returncode']}); end of {log_path}:")
         echo("\n".join("      " + line for line in meta["log_tail"].splitlines()[-25:]))

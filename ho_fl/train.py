@@ -1,5 +1,6 @@
 import gzip
 import json
+from collections import deque
 from dataclasses import asdict
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from .decomfl import CentralEstimator, local_step as decomfl_step
 from .io import append_jsonl, sha256, tensor_hash, write_json
 from .model import load_model, partition_parameters
 from .probes import Probes
+from .faults import Faults, influence_rows
 from .randomness import client_directions
 from .reports import ClientReport
 from .sampling import DepRoundSampler
@@ -38,10 +40,10 @@ class Backend:
         self.estimator = CentralEstimator(self.params, cfg.mu, cfg.q) if cfg.method == "decomfl" else None
         self.processed_tokens = self.answer_tokens = 0
 
-    def optimizer(self, params=None):
-        return optimizer_for(self.params if params is None else params, self.cfg)
+    def optimizer(self, params=None, lr=None):
+        return optimizer_for(self.params if params is None else params, self.cfg, lr=lr)
 
-    def local_step(self, cid, indices, optimizer, directions, e, reference, *, cut=None, zo=True):
+    def local_step(self, cid, indices, optimizer, directions, e, reference, *, cut=None, zo=True, label_map=None):
         cfg = self.cfg
         if cfg.dataset == "squad":
             from .squad import AnswerLossWrapper
@@ -51,6 +53,8 @@ class Backend:
         else:
             batch = collate(self.data["train"], indices, self.tokenizer.pad_token_id, cfg.device)
             wrapper, tokens = self.wrapper, self.tokens
+            if label_map is not None:
+                batch["labels"] = label_map(batch["labels"], e)
         self.processed_tokens += int(batch["attention_mask"].sum().item())
         if cfg.method in {"fedavg", "fedprox"}:
             optimizer.zero_grad(set_to_none=True)
@@ -68,8 +72,11 @@ class Backend:
     def evaluate(self, round_id, final):
         cfg = self.cfg
         if cfg.dataset != "squad":
-            scores = classification_evaluate(self.wrapper, self.data["validation"], self.tokens, self.tokenizer.pad_token_id, cfg.eval_batch_size, cfg.device)
-            return [{"accuracy": scores["accuracy"], "task_loss": scores["validation_loss"], "count": scores["validation_count"], "evaluation_scope": "full_official_test" if cfg.dataset in {"sciq", "ag_news"} else "full_validation"}]
+            scores = classification_evaluate(self.wrapper, self.data["validation"], self.tokens, self.tokenizer.pad_token_id, cfg.eval_batch_size, cfg.device, **({"per_class": True} if cfg.per_class_eval else {}))
+            row = {"accuracy": scores["accuracy"], "task_loss": scores["validation_loss"], "count": scores["validation_count"], "evaluation_scope": "full_official_test" if cfg.dataset in {"sciq", "ag_news"} else "full_validation"}
+            if cfg.per_class_eval:
+                row["per_class_accuracy"] = scores["per_class_accuracy"]
+            return [row]
         from .squad import answer_loss, generate_answers
         subset = self.data["evaluation_indices"]
         score, _ = generate_answers(self.wrapper, self.tokenizer, self.data["validation"], subset)
@@ -106,7 +113,7 @@ def logical_uplink(cfg, total, bottom, zo=True):
             "accounting_scope": "logical_seed_scalar_FO_delta_not_actual_dense_server_transfer"}
 
 
-def train_client(b, state, streams, r, cid, cut):
+def train_client(b, state, streams, r, cid, cut, fault=None, history=None):
     """One participation of client ``cid`` in round ``r``: local training from ``state``, returned as a report.
 
     This is the inner loop of the upstream ``run``: directions, restore, fresh optimizer, E local steps, then the
@@ -114,26 +121,55 @@ def train_client(b, state, streams, r, cid, cut):
 
     ``cut`` is the cut the client trains with. It may differ from the client's own cut only for method hofl and
     only among the cuts of the model's tiers (a device of one tier then behaves like a device of another).
+
+    ``fault`` holds the training-level overrides of ``Faults.before_local`` (learning-rate factor, label map, lag);
+    with a lag the client starts from the state ``lag`` rounds back in ``history`` and its update is the change
+    relative to that starting point, which is what such a device would upload.
     """
     cfg = b.cfg
     if cut != b.cuts[cid] and (cfg.method != "hofl" or cut not in b.bottoms):
         raise ValueError(f"Cut {cut} cannot be used by client {cid}")
     zo = cfg.zo_mode == "on"
     directions = client_directions(cfg.seed, cfg.model, r, cid)
-    restore(b.params, state)
-    optimizer = b.optimizer()
+    origin, extra = state, {}
+    if fault and fault.get("lag") and history:
+        origin = history[max(0, len(history) - 1 - fault["lag"])]
+    if fault and fault.get("label_map"):
+        extra["label_map"] = fault["label_map"]
+    restore(b.params, origin)
+    optimizer = b.optimizer(lr=cfg.lr * fault["lr_scale"]) if fault and "lr_scale" in fault else b.optimizer()
     losses, scalars, batches = [], [], []
     for e in range(cfg.E):
         indices = streams[cid].next()
-        loss, step_scalars = b.local_step(cid, indices, optimizer, directions, e, state, cut=cut, zo=zo)
+        loss, step_scalars = b.local_step(cid, indices, optimizer, directions, e, origin, cut=cut, zo=zo, **extra)
         losses.append(loss)
         scalars.append(step_scalars)
         batches.append(indices)
     with torch.no_grad():
-        delta = {name: param.detach() - state[name] for name, param in b.params.items()}
+        delta = {name: param.detach() - origin[name] for name, param in b.params.items()}
     return ClientReport(cid=cid, round=r, cut=cut, tier=SPECS[cfg.model][3].index(b.resource_cuts[cid]),
                         delta=delta, scalars=scalars, batches=batches, losses=losses,
-                        direction_master_seed=directions.master_seed, zo=zo)
+                        direction_master_seed=directions.master_seed, zo=zo,
+                        fault="+".join(fault["kinds"]) if fault else None)
+
+
+def clean_twin(b, state, report):
+    """The update the participation behind ``report`` would have produced without a training-level fault.
+
+    Same batches, the current global state, the configured learning rate and labels. Nothing observable changes:
+    no data stream advances and the token counters are put back (the parameters are restored by the caller's
+    next step, as after any client).
+    """
+    cfg, counters = b.cfg, (b.processed_tokens, b.answer_tokens)
+    directions = client_directions(cfg.seed, cfg.model, report.round, report.cid)
+    restore(b.params, state)
+    optimizer = b.optimizer()
+    for e, indices in enumerate(report.batches):
+        b.local_step(report.cid, indices, optimizer, directions, e, state, cut=report.cut, zo=report.zo)
+    with torch.no_grad():
+        delta = {name: param.detach() - state[name] for name, param in b.params.items()}
+    b.processed_tokens, b.answer_tokens = counters
+    return delta
 
 
 def run(cfg):
@@ -148,6 +184,8 @@ def run(cfg):
         sampler = Sampler(cfg, b)
         scheduler = make_scheduler(cfg, b.cuts, b.resource_cuts, sampler)
         probes = Probes(cfg, out)
+        faults = Faults(cfg, b.resource_cuts) if cfg.fault_spec else None
+        history = deque(maxlen=faults.max_lag + 1) if faults is not None and faults.max_lag else None
         config = {**asdict(cfg), "method_label": cfg.method_label, "partition_id": b.partition_id,
                   "initial_parameter_sha256": b.initial_hash, "resource_cuts": b.resource_cuts,
                   "actual_cuts": b.cuts, "bottom_dimensions": b.dimensions,
@@ -158,6 +196,8 @@ def run(cfg):
                   "direction_seed_scheme": "stable_seed(seed, model, round, client_id, 'zo_master')",
                   "torch_version": torch.__version__, "cuda_version": torch.version.cuda}
         config.update(aggregation=cfg.aggregation_name, cost_model={"unit": "forward_equivalent", "backward_ratio": BACKWARD_RATIO})
+        if faults is not None:
+            config["faults"] = faults.metadata()
         write_json(out / "config.json", config)
         (out / "manifest.json.gz").write_bytes(gzip.compress(b.manifest_bytes, mtime=0))
         state = {n: p.detach().clone() for n, p in b.params.items()}
@@ -185,15 +225,32 @@ def run(cfg):
             print(json.dumps({"event": "EVAL", **rows[-1]}), flush=True)
             return rows[-1]
 
-        evaluate(0)
+        def evaluate_or_stop(r):
+            """An evaluation, or ``None`` when the model no longer gives finite values and the run is allowed to stop."""
+            try:
+                return evaluate(r)
+            except (AssertionError, ValueError):
+                if cfg.on_nonfinite != "stop":
+                    raise
+                return None
+
+        final, diverged = evaluate(0), None
         for r in range(1, cfg.rounds + 1):
+            if history is not None:
+                history.append({name: tensor.clone() for name, tensor in state.items()})
             # Schedule: the cohort of this round, in the order the sampler returned it.
             plan = scheduler.sample(r)
             selected = plan.clients
             # Local training: one report per client.
             reports = []
             for cid in selected:
-                report = train_client(b, state, streams, r, cid, plan.cut(cid))
+                if faults is None:
+                    report = train_client(b, state, streams, r, cid, plan.cut(cid))
+                else:
+                    report = train_client(b, state, streams, r, cid, plan.cut(cid), fault=faults.before_local(r, cid), history=history)
+                    if report.fault is not None:
+                        report.clean = clean_twin(b, state, report)
+                    report = faults.after_local(r, report)
                 reports.append(report)
                 counts = logical_uplink(cfg, total, b.dimensions[report.cut], zo=report.zo)
                 cumulative += counts["logical_uplink_bytes"]
@@ -205,10 +262,17 @@ def run(cfg):
                              "tier": report.tier, "fault": report.fault,
                              "forward_equivalents": forward_equivalents(cfg.method, cut=report.cut, depth=SPECS[cfg.model][2],
                                                                         E=cfg.E, q=cfg.q, zo=report.zo)})
+            if cfg.on_nonfinite == "stop" and not all(torch.isfinite(value).all().item() for report in reports
+                                                      for value in [*report.losses, *report.delta.values()]):
+                diverged = r  # detected before anything of this round is aggregated or logged
+                break
             # Arrivals: every report is on time until deadlines are modelled.
             arrivals = None
             # Aggregation, then the server step on the global state.
             update, _ = aggregate(reports, arrivals, cfg)
+            if faults is not None:
+                for row in influence_rows(reports, update, cfg):
+                    append_jsonl(out / "influence.jsonl", {"round": r, **row})
             # Read-only probes: they see the reports and the update before the state changes.
             probes.run(r, b, state, reports, arrivals, update)
             apply_update(state, update, cfg.server_lr)
@@ -218,7 +282,10 @@ def run(cfg):
                 b.estimator.round_scalars.clear()
             # Logging and evaluation.
             training_loss = torch.stack([loss for report in reports for loss in report.losses]).mean().item()
-            assert np.isfinite(training_loss) and all(torch.isfinite(p).all().item() for p in b.params.values())
+            if not (np.isfinite(training_loss) and all(torch.isfinite(p).all().item() for p in b.params.values())):
+                assert cfg.on_nonfinite == "stop", "non-finite training loss or parameters"
+                diverged = r
+                break
             if r in save_rounds:
                 save_state(state_path(out, r), state, {"round": r, "seed": cfg.seed, "model": cfg.model,
                            "partition_id": b.partition_id, "initial_parameter_sha256": b.initial_hash})
@@ -228,15 +295,23 @@ def run(cfg):
             status["last_completed_round"] = r
             write_json(out / "status.json", status)
             if r % cfg.evaluate_every == 0 or r == cfg.rounds:
-                final = evaluate(r)
+                evaluated = evaluate_or_stop(r)
+                if evaluated is None:
+                    diverged = r
+                    break
+                final = evaluated
             del reports, report, update
-        summary = {"status": "COMPLETED", "method": cfg.method_label, "seed": cfg.seed,
+        # A diverged run is a result: it keeps its last finite evaluation and says in which round it broke down.
+        outcome = "COMPLETED" if diverged is None else "DIVERGED"
+        summary = {"status": outcome, "method": cfg.method_label, "seed": cfg.seed,
                    "partition_id": b.partition_id, "initial_parameter_sha256": b.initial_hash, **final}
+        if diverged is not None:
+            summary["diverged_round"] = status["diverged_round"] = diverged
         summary["final_parameter_sha256"] = tensor_hash(state)
         if cfg.init_state:
             summary["init_state_parameter_sha256"] = loaded["parameter_sha256"]
         write_json(out / "summary.json", summary)
-        write_json(out / "status.json", {**status, "status": "COMPLETED"})
+        write_json(out / "status.json", {**status, "status": outcome})
         return summary
     except BaseException as error:
         write_json(out / "status.json", {**status, "status": "FAILED", "error": repr(error)})

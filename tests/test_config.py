@@ -17,7 +17,8 @@ UPSTREAM_DEFAULTS = {
 # Options added by RHO-FFT, with the value that keeps the upstream behaviour. Register every new field here.
 NEW_DEFAULTS = {"save_state_rounds": "", "init_state": "", "zo_mode": "on", "server_lr": 1.0, "agg_electorate": "all",
                 "agg_weight": "cohort", "fo_quorum": 1, "thin_policy": "all", "tier_quota": "", "in_tier": "rotate",
-                "rotate_window": 20, "layer_stats": False, "probe_rounds": ""}
+                "rotate_window": 20, "layer_stats": False, "probe_rounds": "", "agg_stat": "mean", "agg_unit": "layer",
+                "norm_clip": 0.0, "schedule_file": "", "fault_spec": "", "on_nonfinite": "raise", "per_class_eval": False}
 
 
 def test_defaults_are_the_upstream_defaults_plus_registered_new_fields():

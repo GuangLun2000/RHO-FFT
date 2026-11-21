@@ -45,7 +45,7 @@ def layer_stats(reports, arrivals, update, cfg):
     """One row per layer for the reports of a round. Reads tensors only; nothing is modified."""
     bounds = segment_bounds(SPECS[cfg.model][3], SPECS[cfg.model][2])
     rows = []
-    for plan in plan_units(reports, arrivals, cfg):
+    for plan in plan_units(reports, arrivals, cfg, unit="layer"):
         matrix = torch.stack([torch.cat([report.delta[name].reshape(-1) for name in plan.names]) for report in reports]).double()
         gram = (matrix @ matrix.T).cpu()
         norms = gram.diagonal().clamp_min(0).sqrt()
@@ -98,7 +98,7 @@ def _row(dot, a, c, dimension):
 
 def counterfactual_rows(report, counterfactual, cfg):
     """Rows comparing a report with its first-order counterfactual: one per layer and pooled ones per order."""
-    plan = plan_units([report], None, cfg)
+    plan = plan_units([report], None, cfg, unit="layer")
     rows, pooled = [], {}
     base = {"client": report.cid, "tier": report.tier, "cut": report.cut}
     for unit in plan:

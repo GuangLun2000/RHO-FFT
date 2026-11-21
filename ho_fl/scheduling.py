@@ -192,6 +192,56 @@ class TierQuotaScheduler:
                 "target_inclusion_probabilities": inclusion}
 
 
+class ScheduleFileScheduler:
+    """Cohorts read from a JSON-lines file, one row per round: ``{"round": r, "clients": [...], "cut_override": {"cid": cut}}``.
+
+    Used for controlled experiments in which every arm must see the same devices in the same order. A cut override
+    makes a device train like a device of another tier for that round; it is a device of the experiment, not a
+    statement about real hardware. ``p`` is the realised selection frequency over the file divided by K.
+    """
+
+    def __init__(self, path, cuts, k):
+        import json
+        from pathlib import Path
+
+        self.path, self.cuts, self.k = str(path), list(cuts), k
+        self.rows = {}
+        for line in Path(path).read_text().splitlines():
+            if line.strip():
+                row = json.loads(line)
+                clients = [int(cid) for cid in row["clients"]]
+                if len(clients) != k or len(set(clients)) != k or any(not 0 <= cid < len(self.cuts) for cid in clients):
+                    raise ValueError(f"Round {row['round']} of {path} does not list {k} distinct valid clients")
+                override = {int(cid): int(cut) for cid, cut in (row.get("cut_override") or {}).items()}
+                if not set(override) <= set(clients):
+                    raise ValueError(f"Round {row['round']} of {path} overrides the cut of a client that is not selected")
+                self.rows[int(row["round"])] = (clients, override)
+        counts = Counter(cid for clients, _ in self.rows.values() for cid in clients)
+        self.frequency = [counts[cid] / max(len(self.rows), 1) for cid in range(len(self.cuts))]
+
+    def sample(self, round_id, available=None):
+        if available is not None:
+            raise NotImplementedError("Availability constraints are not supported yet")
+        if round_id not in self.rows:
+            raise ValueError(f"{self.path} has no cohort for round {round_id}")
+        clients, override = self.rows[round_id]
+        return RoundPlan(round_id, list(clients), self.cuts, dict(override))
+
+    def observe(self, round_id, arrivals):
+        pass
+
+    def probability(self, cid):
+        return self.frequency[cid] / self.k
+
+    def inclusion(self):
+        return list(self.frequency)
+
+    def metadata(self):
+        return {"sampler": "schedule_file", "path": self.path, "rounds": len(self.rows), "p": [value / self.k for value in self.frequency],
+                "target_inclusion_probabilities": list(self.frequency),
+                "overridden_rounds": sum(1 for _, override in self.rows.values() if override)}
+
+
 def make_scheduler(cfg, cuts, resource_cuts, sampler=None):
     """The scheduler named by ``cfg.sampler``.
 
@@ -199,6 +249,8 @@ def make_scheduler(cfg, cuts, resource_cuts, sampler=None):
     ``ho_fl.train.Sampler`` of the run; without it only ``dep_round_v1`` and the tier schedulers can be built
     (enough to simulate them without a model).
     """
+    if cfg.sampler == "schedule_file":
+        return ScheduleFileScheduler(cfg.schedule_file, cuts, cfg.k)
     if cfg.sampler == "tier_equalised":
         return TierEqualisedScheduler(resource_cuts, cuts, cfg.k, cfg.beta, cfg.seed)
     if cfg.sampler == "tier_quota":

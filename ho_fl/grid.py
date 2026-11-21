@@ -135,7 +135,7 @@ def run_queue(specs, *, root, tree, hardware, revision, common, deadline=None, j
 
     A spec is ``{"name", "fields", "timing_key", ...}``; other keys are copied to its entry. ``common(fields)``
     returns the fields added to every run (device, cache directory). ``deadline`` is a ``time.time()`` value.
-    Entry statuses: ``COMPLETED``, ``FAILED``, ``TIMEOUT``, ``SKIPPED_BUDGET``, ``SKIPPED_PREFLIGHT``.
+    Entry statuses: ``COMPLETED``, ``DIVERGED``, ``FAILED``, ``TIMEOUT``, ``SKIPPED_BUDGET``, ``SKIPPED_PREFLIGHT``.
     """
     root = Path(root)
     timings_path = root / f"timings-{hardware}.json"
@@ -152,7 +152,7 @@ def run_queue(specs, *, root, tree, hardware, revision, common, deadline=None, j
     # Phase 1: probe every cost profile that still has runs to do, one at a time, alone on the GPU.
     for spec in specs:
         key = spec["timing_key"]
-        if key in timings or key in failures or harness.run_status(root / "runs" / spec["name"]) == "COMPLETED":
+        if key in timings or key in failures or harness.run_status(root / "runs" / spec["name"]) in harness.FINISHED:
             continue
         if remaining() < 300:
             failures[key] = "less than five minutes of budget left"
@@ -209,7 +209,7 @@ def run_queue(specs, *, root, tree, hardware, revision, common, deadline=None, j
                 entry = {key: value for key, value in spec.items() if key != "fields"}
                 entry["output"] = str(root / "runs" / spec["name"])
                 entries.append(entry)
-                if harness.run_status(entry["output"]) == "COMPLETED":
+                if harness.run_status(entry["output"]) in harness.FINISHED:
                     running[pool.submit(work, spec, None)] = (spec, entry, None)
                 elif spec["timing_key"] not in timings:
                     entry.update(status="SKIPPED_PREFLIGHT", reason=str(failures.get(spec["timing_key"], "no timing available")))

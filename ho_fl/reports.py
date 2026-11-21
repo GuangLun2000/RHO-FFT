@@ -24,6 +24,7 @@ class ClientReport:
     direction_master_seed: int
     fault: str = None
     zo: bool = True             # whether the zeroth-order update was executed (zo_mode); if not, layers below the cut did not move
+    clean: dict = None          # for a faulty report: the update this participation would have sent without the fault
 
     @property
     def train_loss(self):

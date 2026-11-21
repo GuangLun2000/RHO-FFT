@@ -54,6 +54,13 @@ class Config:
     rotate_window: int = 20
     layer_stats: bool = False
     probe_rounds: str = ""
+    agg_stat: str = "mean"
+    agg_unit: str = "layer"
+    norm_clip: float = 0.0
+    schedule_file: str = ""
+    fault_spec: str = ""
+    on_nonfinite: str = "raise"
+    per_class_eval: bool = False
 
     @property
     def betas(self):
@@ -81,7 +88,9 @@ class Config:
         for name, fields in NAMED_AGGREGATIONS.items():
             if all(getattr(self, key) == value for key, value in fields.items()):
                 return name
-        return f"agg={self.agg_electorate}/{self.agg_weight}/quorum{self.fo_quorum}/{self.thin_policy}"
+        return (f"agg={self.agg_electorate}/{self.agg_weight}/quorum{self.fo_quorum}/{self.thin_policy}"
+                + (f"/{self.agg_stat}" if self.agg_stat != "mean" else "") + (f"/{self.agg_unit}" if self.agg_unit != "layer" else "")
+                + (f"/clip{self.norm_clip:g}" if self.norm_clip else ""))
 
     @property
     def variant_label(self):
@@ -91,6 +100,10 @@ class Config:
             parts.append("tier_equalised")
         if self.sampler == "tier_quota":
             parts.append(f"tier_quota {self.tier_quota} {self.in_tier}")
+        if self.sampler == "schedule_file":
+            parts.append("schedule_file")
+        if self.fault_spec:
+            parts.append("faults")
         if self.aggregation_name != "mean_all":
             parts.append(self.aggregation_name)
         if self.zo_mode != "on":
@@ -114,10 +127,12 @@ class Config:
             self.beta = 0.0
         if self.sampler == "auto":
             self.sampler = "dep_round_v1"
-        if self.sampler not in {"dep_round_v1", "historical_torch", "historical_numpy_uniform", "tier_equalised", "tier_quota"}:
+        if self.sampler not in {"dep_round_v1", "historical_torch", "historical_numpy_uniform", "tier_equalised", "tier_quota", "schedule_file"}:
             raise ValueError("Unsupported sampler")
-        if self.sampler == "tier_quota":
+        if self.sampler in {"tier_quota", "schedule_file"}:
             self.beta = 0.0
+        if (self.sampler == "schedule_file") != bool(self.schedule_file):
+            raise ValueError("schedule_file is required by, and only used with, sampler schedule_file")
         if self.beta and self.sampler not in {"dep_round_v1", "tier_equalised"}:
             raise ValueError("Resource-preference sampling requires DepRound")
         if self.evaluate_every == 0:
@@ -141,14 +156,28 @@ class Config:
             raise ValueError("probe_rounds must lie in [1, rounds]")
         if (self.layer_stats or self.probe_rounds.strip()) and self.dataset == "squad":
             raise ValueError("Probes are defined for the classification datasets only")
+        if self.agg_stat not in {"mean", "geomed", "cwmed", "trimmed"} or self.agg_unit not in {"layer", "segment", "whole"} or self.norm_clip < 0:
+            raise ValueError("Unsupported agg_stat, agg_unit or norm_clip")
+        if self.agg_unit == "whole" and self.agg_electorate != "all":
+            raise ValueError("agg_unit=whole treats the model as one vector and only goes with agg_electorate=all")
+        if self.on_nonfinite not in {"raise", "stop"}:
+            raise ValueError("on_nonfinite is raise or stop")
+        if (self.fault_spec or self.per_class_eval) and self.dataset == "squad":
+            raise ValueError("Faults and per-class evaluation are defined for the classification datasets only")
         return self
 
 
-# The aggregation configurations of the brief (section 6.4) that are implemented so far, as config fields.
+# The aggregation configurations of the brief (section 6.4), as config fields. agg_weight only matters for the
+# mean; fo_quorum and thin_policy only when the electorate is restricted to first-order reports.
+_PLAIN = {"agg_unit": "layer", "norm_clip": 0.0}
 NAMED_AGGREGATIONS = {
-    "mean_all": {"agg_electorate": "all", "agg_weight": "cohort"},
-    "fo_mean": {"agg_electorate": "fo", "agg_weight": "count", "fo_quorum": 1, "thin_policy": "all"},
-    "fo_diluted": {"agg_electorate": "fo", "agg_weight": "cohort", "fo_quorum": 1, "thin_policy": "all"},
+    "mean_all": {"agg_electorate": "all", "agg_stat": "mean", "agg_weight": "cohort", **_PLAIN},
+    "fo_mean": {"agg_electorate": "fo", "agg_stat": "mean", "agg_weight": "count", "fo_quorum": 1, "thin_policy": "all", **_PLAIN},
+    "fo_diluted": {"agg_electorate": "fo", "agg_stat": "mean", "agg_weight": "cohort", "fo_quorum": 1, "thin_policy": "all", **_PLAIN},
+    "robust_all": {"agg_electorate": "all", "agg_stat": "geomed", **_PLAIN},
+    "robust_whole": {"agg_electorate": "all", "agg_stat": "geomed", "agg_unit": "whole", "norm_clip": 0.0},
+    "fo_robust": {"agg_electorate": "fo", "agg_stat": "geomed", "fo_quorum": 1, "thin_policy": "all", **_PLAIN},
+    "quorum_robust": {"agg_electorate": "fo", "agg_stat": "geomed", "fo_quorum": 3, "thin_policy": "all", **_PLAIN},
 }
 
 

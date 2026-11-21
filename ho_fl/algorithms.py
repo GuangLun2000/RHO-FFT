@@ -1,8 +1,8 @@
 import torch
 import torch.nn.functional as F
 
-def optimizer_for(params, cfg):
-    return torch.optim.AdamW(list(params.values()), lr=cfg.lr, betas=tuple(cfg.betas), eps=cfg.eps, weight_decay=cfg.weight_decay, amsgrad=cfg.amsgrad, foreach=cfg.foreach, fused=cfg.fused, maximize=False, capturable=False, differentiable=False)
+def optimizer_for(params, cfg, lr=None):
+    return torch.optim.AdamW(list(params.values()), lr=cfg.lr if lr is None else lr, betas=tuple(cfg.betas), eps=cfg.eps, weight_decay=cfg.weight_decay, amsgrad=cfg.amsgrad, foreach=cfg.foreach, fused=cfg.fused, maximize=False, capturable=False, differentiable=False)
 
 def task_loss(wrapper, batch, tokens):
     logits = wrapper.forward(batch['input_ids'], batch['attention_mask'], token_ids=tokens)[:, -1].float()
