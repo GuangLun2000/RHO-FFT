@@ -122,7 +122,7 @@ def collect(ctx):
             "planned_runs": len(plan or []), "finished_runs": finished,
             "tables": {fault: dose.table_rows(arms, fault, sorted(ctx.doses)) for fault in ctx.faults if fault != "none"},
             "clean": dose.table_rows(arms, "none", sorted(ctx.doses)),
-            "h2": dose.decide_h2(arms, sorted(ctx.doses)) if arms else {},
+            "h2": {fault: entry for fault, entry in dose.decide_h2(arms, sorted(ctx.doses)).items() if fault in ctx.faults} if arms else {},
             "arms": [{"m": m, "aggregation": aggregation, "fault": fault, **outcome} for (m, aggregation, fault), outcome in sorted(arms.items())],
             "queue": harness.read_json(ctx.root / "queue_all.json"), "timings": timings,
             "wall_hours": sum(meta.get("wall_s") or 0 for meta in metas) / 3600,

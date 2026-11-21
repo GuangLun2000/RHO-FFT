@@ -157,3 +157,11 @@ Colab 会话（Qwen，种子 42 起）：E2 在会话内先跑 40 轮得到起�
 4. **并行**：两个运行共用 G4 时 HO-FL 每轮从 3.0 秒变成 5.2 秒，吞吐只提高约 15%。队列保留并行，但估时按实测值。
 5. **环境**：G4 上实际使用 torch 2.7.1+cu128，回归在这个环境里逐位通过；与论文数值的对照要带着这一点看。
 
+## 10 P2 的进度（2026-11-21）
+
+已实现并有 CPU 测试：`on_nonfinite` 与 `DIVERGED`；稳健统计量（`geomed`、`cwmed`、`trimmed`）、`agg_unit`、`norm_clip` 和四个稳健的具名配置，附录 B 的合成测试已入库并复现说明的参考值；`schedule_file` 调度器；`faults.py`（`label_noise`、`lr_scale`、`stale`、`noop`、`sign_flip`、`gauss`，干净孪生，逐层相对影响 `influence.jsonl`）；`per_class_eval`；剂量响应实验 E2（`ho_fl/dose.py`、`experiments/p2/`、`notebooks/P2_colab.ipynb`）。
+
+还没有做：端到端韧性实验 E3 的实验臂和韧性指标（窗口内平均下降、最大下降、恢复轮数、最终差距）。它的配置取决于 E2 的结果（法定数不足时用哪种做法），所以放在 E2 的反馈之后。时间类故障 `late` 属于 P3 的链路模型。
+
+与第 5 节计划的差别：`quorum_robust` 在 E2 的名单下按构造与 `fo_robust`（m≥2）或 `robust_all`（m≤1）完全相同，不单独运行；新增 `quorum_hold`、`quorum_dilute` 两个关掉零阶的实验臂。共 6 种规则 × 6 个 m × 3 种故障条件 = 108 个 20 轮的运行，加一次 40 轮的起点运行。
+
