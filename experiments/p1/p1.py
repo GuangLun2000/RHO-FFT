@@ -9,8 +9,10 @@ Stages (finished runs under the same root are reused; nothing persists between s
   feedback   tables, the H1 and H1a computations, CSV files and a bundle   -> <root>/feedback/
 
 The arms are defined in arms.json. Block 1 holds the five runs that decide H1a, block 2 adds the runs for H1 and
-the two bounds, block 3 completes the ladder. `--tiny` replaces model and data by the synthetic tiny assets and
-runs on CPU: a plumbing check whose numbers mean nothing.
+the two bounds, block 3 completes the ladder, block 4 holds the controls added after the first session (larger
+server step for other arms, more zeroth-order directions, longer training; first seed of the session only).
+`--tiny` replaces model and data by the synthetic tiny assets and runs on CPU: a plumbing check whose numbers
+mean nothing.
 
 The baseline regression (invariants I1 and I2) is not repeated here: run `experiments/p0/p0.py env golden regress`
 in the same session before the queue.
@@ -37,6 +39,8 @@ REFERENCE = {
     "opt": {"A-b0": (59.58, 2.24), "A-b0.75": (62.85, 6.52), "fedavg": (78.24, 2.97), "decomfl": (23.38, 0.08)},
 }
 PLANNED_SEEDS = {"qwen": 3, "opt": 5}
+# Accuracy levels (%) used to express how fast an arm learns ("rounds to reach").
+TARGETS = {"qwen": (80.0, 85.0, 87.0), "opt": (40.0, 50.0, 60.0)}
 
 
 def hardware_slug(device):
@@ -77,19 +81,22 @@ class Context:
 
 
 def specs(ctx, blocks=None):
-    """The runs of the plan in queue order: seed by seed, arms in the order of arms.json."""
+    """The runs of the plan in queue order: the ladder seed by seed (arms in the order of arms.json), then the
+    arms marked ``first_seed_only`` for the first seed. An arm with its own ``rounds`` keeps its ratio to the base."""
     result = []
-    for seed in ctx.seeds:
-        for arm in ARMS["arms"]:
-            if blocks is not None and arm["block"] not in blocks:
-                continue
-            fields = {"model": ctx.model, **ARMS["base"], **arm["fields"], "seed": seed, "rounds": ctx.rounds}
-            if arm.get("probes"):
-                probe_rounds = [r for r in (int(part) for part in ARMS["probe_rounds"].split(",")) if r <= ctx.rounds]
-                fields["probe_rounds"] = ",".join(str(r) for r in sorted(set(probe_rounds) | {ctx.rounds}))
-            name = f"{ctx.model}-s{seed}-{arm['name']}" + ("" if ctx.rounds == DEFAULT_ROUNDS else f"-r{ctx.rounds}")
-            result.append({"name": name, "arm": arm["name"], "seed": seed, "block": arm["block"],
-                           "timing_key": f"{ctx.model}/{arm['timing_key']}", "fields": fields})
+    for controls in (False, True):
+        for seed in ctx.seeds[:1] if controls else ctx.seeds:
+            for arm in ARMS["arms"]:
+                if bool(arm.get("first_seed_only")) != controls or (blocks is not None and arm["block"] not in blocks):
+                    continue
+                rounds = ctx.rounds * arm.get("rounds", DEFAULT_ROUNDS) // DEFAULT_ROUNDS
+                fields = {"model": ctx.model, **ARMS["base"], **arm["fields"], "seed": seed, "rounds": rounds}
+                if arm.get("probes"):
+                    probe_rounds = [r for r in (int(part) for part in ARMS["probe_rounds"].split(",")) if r <= rounds]
+                    fields["probe_rounds"] = ",".join(str(r) for r in sorted(set(probe_rounds) | {rounds}))
+                name = f"{ctx.model}-s{seed}-{arm['name']}" + ("" if ctx.rounds == DEFAULT_ROUNDS else f"-r{ctx.rounds}")
+                result.append({"name": name, "arm": arm["name"], "seed": seed, "block": arm["block"],
+                               "timing_key": f"{ctx.model}/{arm['timing_key']}", "fields": fields})
     return result
 
 
@@ -137,7 +144,7 @@ def stage_queue(ctx):
 def collect(ctx):
     plan = specs(ctx)
     arms = {arm["name"]: arm for arm in ARMS["arms"]}
-    runs, accuracy = [], {}
+    runs, accuracy, curves = [], {}, {}
     for spec in plan:
         run_dir = ctx.root / "runs" / spec["name"]
         if harness.run_status(run_dir) != "COMPLETED":
@@ -151,6 +158,7 @@ def collect(ctx):
                      "probe_errors": [r for r in probe if r.get("scope") == "error"],
                      "supply": supply.empirical(run_dir) if row["method"] == "hofl" else None})
         accuracy.setdefault(spec["arm"], {})[spec["seed"]] = row["final_accuracy_pct"]
+        curves.setdefault(spec["arm"], {})[spec["seed"]] = runs[-1]["curve"]
     comparable = ctx.rounds == DEFAULT_ROUNDS and not ctx.tiny
     planned = PLANNED_SEEDS.get(ctx.model, 3)
     timings = harness.read_json(ctx.root / f"timings-{ctx.hardware}.json", {})
@@ -158,6 +166,9 @@ def collect(ctx):
     return {"generated_at": grid.now(), "tiny": ctx.tiny, "model": ctx.model, "seeds": ctx.seeds, "rounds": ctx.rounds,
             "comparable": comparable, "head": ctx.head, "hardware": ctx.hardware, "runs": runs, "accuracy": accuracy,
             "h1a": analysis.decide_h1a(accuracy, planned), "h1": analysis.decide_h1(accuracy, planned),
+            "control": analysis.step_size_control(accuracy),
+            "speedup": analysis.sampling_speedup(curves, max(1, ctx.rounds // 4)),
+            "targets": TARGETS.get(ctx.model, TARGETS["qwen"]),
             "queue": harness.read_json(ctx.root / "queue_all.json"), "timings": timings,
             "supply_text": (ctx.root / "supply" / f"supply_{ctx.model}.txt").read_text() if (ctx.root / "supply" / f"supply_{ctx.model}.txt").exists() else None,
             "wall_hours": sum(meta.get("wall_s") or 0 for meta in metas) / 3600,
@@ -194,6 +205,45 @@ def accuracy_table(data):
                   "uplink MB per round", "paper (sd)"], rows)
 
 
+def speed_table(data):
+    """How fast each arm learns: accuracy after the base number of rounds, rounds needed for fixed accuracy levels."""
+    window, targets, rows = data["rounds"], data["targets"], []
+
+    def average(values, digits):
+        values = [value for value in values if value is not None]
+        return fmt(statistics.mean(values), digits) if values else "n/a"
+
+    for arm in ARMS["arms"]:
+        members = [run for run in data["runs"] if run["summary"]["arm"] == arm["name"]]
+        if not members:
+            continue
+        reached = []
+        for target in targets:
+            hits = [analysis.rounds_to_reach(run["curve"], target) for run in members]
+            reached.append(average(hits, 0) + (f" ({sum(hit is not None for hit in hits)} of {len(hits)})" if None in hits and any(hit is not None for hit in hits) else "")
+                           if any(hit is not None for hit in hits) else "not reached")
+        rows.append([arm["name"], len(members), members[0]["summary"]["rounds"], average([analysis.accuracy_at(run["curve"], window) for run in members], 2),
+                     average([run["summary"]["final_accuracy_pct"] for run in members], 2), *reached,
+                     average([analysis.mean_accuracy(run["curve"], window) for run in members], 2)])
+    return table(["arm", "seeds", "rounds", f"accuracy % at round {window}", "final accuracy %",
+                  *[f"rounds to reach {target:g}%" for target in targets], f"mean accuracy % over rounds 0-{window}"], rows)
+
+
+def step_ratio_table(data):
+    """Norm of the applied update per segment relative to the baseline A-b0 of the same seed."""
+    base = {run["summary"]["seed"]: {entry["segment"]: entry["update_norm"] for entry in run["layers"]}
+            for run in data["runs"] if run["layers"] and run["summary"]["arm"] == "A-b0"}
+    rows = []
+    for run in data["runs"]:
+        reference = base.get(run["summary"]["seed"])
+        if not run["layers"] or not reference or run["summary"]["arm"] == "A-b0":
+            continue
+        ratios = [fmt(entry["update_norm"] / reference[entry["segment"]], 2) if reference.get(entry["segment"]) else "n/a" for entry in run["layers"]]
+        rows.append([run["summary"]["arm"], run["summary"]["seed"], *ratios])
+    segments = max((len(run["layers"]) for run in data["runs"] if run["layers"]), default=0)
+    return table(["arm", "seed", *[f"S{index}" for index in range(segments)]], rows) if rows else None
+
+
 def render(data):
     out = []
     add = out.append
@@ -214,6 +264,8 @@ def render(data):
     add("\n## 2. E1c: ablation ladder\n")
     add(accuracy_table(data))
     add("\nForward-equivalents: one forward pass through all blocks for one batch; a backward pass costs two (accounting model, not a measurement).")
+    add("\nSpeed of learning. No arm has converged after the base number of rounds, so the final accuracy largely measures speed:\n")
+    add(speed_table(data))
 
     add("\n## 3. H1a: is the gain of biased sampling a matter of dilution?\n")
     h1a = data["h1a"]
@@ -226,6 +278,18 @@ def render(data):
         add(f"\nRule of the brief: supported when mean G_C >= 0.7 x mean G_beta and mean G_lr < 0.5 x mean G_C. "
             f"**{h1a['verdict']}**" + (" (preliminary: " + f"{len(h1a['seeds'])} of {data['planned_seeds']} seeds)" if h1a["preliminary"] else "")
             + f": {h1a.get('reason', '')}.")
+
+    control = data["control"]
+    if control["seeds"]:
+        show = lambda value: f"{value:+.2f}" if value is not None else "n/a"  # noqa: E731
+        add("\nStep-size control (uniform sampling): does a larger server step alone give what first-order-only averaging gives?\n")
+        add(table(["seed", "C - A", "A x2 - A", "A x3 - A", "C x2 - A x2 (same step)"],
+                  [[row["seed"], show(row["g_c"]), show(row["g_x2"]), show(row["g_x3"]), show(row["matched_x2"])] for row in control["per_seed"]]
+                  + [["mean", show(control["g_c"]), show(control["g_x2"]), show(control["g_x3"]), show(control["matched_x2"])]]))
+        add("\n" + {True: "The larger step alone reaches at least half of the gain of first-order-only averaging, so that gain cannot be "
+                            "attributed to the electorate by this comparison; the same-step column is the cleaner one.",
+                     False: "The larger step alone stays below half of the gain of first-order-only averaging.",
+                     None: "Not enough runs to compare, or first-order-only averaging gained nothing."}[control["explained"]])
 
     add("\n## 4. H1: how much do the zeroth-order updates contribute?\n")
     add("Model level, A (zeroth-order on) minus B (off, same weight 1/K):\n")
@@ -266,6 +330,12 @@ def render(data):
         add(table(["arm", "seed", "segment", "first-order reports", "zeroth-order reports", "norm of a first-order component",
                    "norm of a zeroth-order component", "norm of the first-order mean", "norm of the zeroth-order mean", "cosine FO-FO",
                    "cosine ZO-ZO", "cosine FO-ZO", "norm of the applied update", "electorate rule"], rows))
+
+        ratios = step_ratio_table(data)
+        if ratios:
+            add("\nNorm of the applied update relative to the baseline A-b0 of the same seed (an arm that averages first-order "
+                "reports only, or scales the server step, acts as a larger step on some or all segments):\n")
+            add(ratios)
 
     supplied = [run for run in data["runs"] if run["supply"]]
     add("\n## 6. First-order supply\n")
@@ -327,6 +397,17 @@ def findings(data):
                      + (" A single seed cannot separate this from seed noise: the paper's seed standard deviation for these runs is of the same order as the gains." if len(h1a["seeds"]) == 1 else ""))
     elif h1a["verdict"] == "CANNOT_JUDGE":
         lines.append(f"H1a cannot be judged: {h1a['reason']}.")
+    control, speedup = data["control"], data["speedup"]
+    if control["explained"] is not None:
+        lines.append(f"Step-size control: first-order-only averaging gains {control['g_c']:+.2f} points over the baseline; doubling the server step gains "
+                     f"{fmt(control['g_x2'], 2)}, tripling it {fmt(control['g_x3'], 2)}. "
+                     + ("A larger step alone explains the gain by the rule of the brief. " if control["explained"] else "A larger step alone does not explain the gain. ")
+                     + (f"At the same doubled step, first-order-only averaging is {control['matched_x2']:+.2f} points from the baseline." if control["matched_x2"] is not None
+                        else "The same-step comparison (C x2 against A x2) has not been run."))
+    if speedup["per_seed"]:
+        lines.append(f"Biased sampling at round {speedup['round']}: {speedup['gain_zo_on']:+.2f} points over uniform sampling with the zeroth-order updates on, "
+                     f"{speedup['gain_zo_off']:+.2f} with them off; the two biased-sampling curves are never more than {speedup['max_gap_on_off']:.2f} points apart. "
+                     "A gain that is the same without zeroth-order updates cannot come from lower zeroth-order variance.")
     for beta, entry in data["h1"].items():
         if "a_minus_b" in entry:
             lines.append(f"H1 ({beta}): switching the zeroth-order updates off changes the final accuracy by {-entry['a_minus_b']:+.2f} points "
@@ -384,7 +465,7 @@ def main(argv=None):
     parser.add_argument("--root", default="outputs/p1", help="directory that receives every result of the pipeline")
     parser.add_argument("--model", choices=["qwen", "opt"], default="qwen")
     parser.add_argument("--seeds", default="42", help="comma-separated seeds; the queue goes seed by seed")
-    parser.add_argument("--blocks", default="1,2,3", help="blocks of arms.json to queue")
+    parser.add_argument("--blocks", default="1,2,3,4", help="blocks of arms.json to queue")
     parser.add_argument("--rounds", type=int, default=0, help="rounds per run (default 160; other values are not comparable with the paper)")
     parser.add_argument("--jobs", type=int, default=1, help="runs that may share the GPU; limited further by the measured memory per run")
     parser.add_argument("--device", default="cuda")

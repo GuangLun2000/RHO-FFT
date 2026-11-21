@@ -18,6 +18,12 @@ spec.loader.exec_module(p1)
 
 # --- queue --------------------------------------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def no_gpu_memory(monkeypatch):
+    """The queue asks nvidia-smi how much memory the GPU has; these tests describe a machine where it cannot tell."""
+    monkeypatch.setattr(grid, "gpu_memory", lambda: None)
+
+
 def make_specs(count, key="m/hofl"):
     return [{"name": f"run{index}", "arm": f"arm{index}", "timing_key": key if index != 2 else "m/fedavg",
              "fields": {"rounds": 160, "method": "hofl"}} for index in range(count)]
@@ -168,8 +174,9 @@ class Plan:
 
 def test_p1_arms_resolve_to_the_configurations_of_the_brief():
     specs = p1.specs(Plan())
-    assert len(specs) == 24 and [s["arm"] for s in specs[:5]] == ["A-b0", "C-b0", "A-b0.75", "Ax2-b0", "Ax3-b0"] and specs[12]["seed"] == 43
-    assert len({s["name"] for s in specs}) == 24 and specs[0]["name"] == "qwen-s42-A-b0"
+    # The ladder for both seeds (2 x 12), then the seven controls for the first seed only.
+    assert len(specs) == 31 and [s["arm"] for s in specs[:5]] == ["A-b0", "C-b0", "A-b0.75", "Ax2-b0", "Ax3-b0"] and specs[12]["seed"] == 43
+    assert len({s["name"] for s in specs}) == 31 and specs[0]["name"] == "qwen-s42-A-b0"
     resolved = {s["arm"]: Config(**s["fields"]).resolve() for s in specs[:12]}
     names = {arm: (cfg.aggregation_name, cfg.zo_mode, cfg.server_lr, cfg.beta) for arm, cfg in resolved.items()}
     assert names["A-b0"] == ("mean_all", "on", 1.0, 0.0) and names["A-b0.75"] == ("mean_all", "on", 1.0, 0.75)
@@ -179,7 +186,58 @@ def test_p1_arms_resolve_to_the_configurations_of_the_brief():
     assert all((cfg.E, cfg.q, cfg.k, cfg.lr, cfg.batch_size, cfg.sampler) == (5, 2, 6, 1e-5, 16, "dep_round_v1") for cfg in resolved.values())  # I5
     assert resolved["A-b0"].probe_rounds == "1,20,40,80,160" and resolved["C-b0"].probe_rounds == "" and resolved["fedavg"].method == "fedavg"
     assert [s["arm"] for s in p1.specs(Plan(), blocks=[2])[:4]] == ["B-b0", "B-b0.75", "fedavg", "decomfl"]
-    assert {s["timing_key"] for s in specs} == {"qwen/hofl", "qwen/hofl-zo-off", "qwen/fedavg", "qwen/decomfl"}
+    assert {s["timing_key"] for s in specs[:24]} == {"qwen/hofl", "qwen/hofl-zo-off", "qwen/fedavg", "qwen/decomfl"}
     short = Plan()
     short.rounds = 3
     assert p1.specs(short)[0]["fields"]["probe_rounds"] == "1,3" and p1.specs(short)[0]["name"].endswith("-r3")
+
+
+def test_control_arms_run_for_the_first_seed_only_and_keep_everything_else_at_the_defaults():
+    controls = p1.specs(Plan(), blocks=[4])
+    assert [s["arm"] for s in controls] == ["Cx2-b0", "Ax2-b0.75", "fedavg-x2", "A-b0-q8", "C-b0-r480", "A-b0-r480", "Ax3-b0-r480"]
+    assert {s["seed"] for s in controls} == {42} and controls[-1]["name"] == "qwen-s42-Ax3-b0-r480"
+    resolved = {s["arm"]: Config(**s["fields"]).resolve() for s in controls}
+    settings = {arm: (cfg.aggregation_name, cfg.server_lr, cfg.beta, cfg.q, cfg.rounds, cfg.evaluate_every) for arm, cfg in resolved.items()}
+    assert settings["Cx2-b0"] == ("fo_mean", 2.0, 0.0, 2, 160, 10) and settings["Ax2-b0.75"] == ("mean_all", 2.0, 0.75, 2, 160, 10)
+    assert settings["A-b0-q8"] == ("mean_all", 1.0, 0.0, 8, 160, 10) and resolved["fedavg-x2"].method == "fedavg" and resolved["fedavg-x2"].server_lr == 2.0
+    assert settings["C-b0-r480"] == ("fo_mean", 1.0, 0.0, 2, 480, 20) and settings["Ax3-b0-r480"] == ("mean_all", 3.0, 0.0, 2, 480, 20)
+    assert all((cfg.E, cfg.k, cfg.lr, cfg.batch_size, cfg.zo_mode) == (5, 6, 1e-5, 16, "on") for cfg in resolved.values())
+    assert {s["timing_key"] for s in controls} == {"qwen/hofl", "qwen/fedavg", "qwen/hofl-q8"}
+    short = Plan()
+    short.rounds = 3
+    tiny = {s["arm"]: s for s in p1.specs(short, blocks=[4])}
+    assert tiny["A-b0-r480"]["fields"]["rounds"] == 9 and tiny["Cx2-b0"]["fields"]["rounds"] == 3 and tiny["A-b0-r480"]["name"] == "qwen-s42-A-b0-r480-r3"
+
+
+def curve(*points):
+    return [{"round": r, "accuracy_pct": a} for r, a in points]
+
+
+def test_speed_measures():
+    rising = curve((0, 50.0), (10, 70.0), (20, 80.0), (40, 84.0))
+    assert analysis.accuracy_at(rising, 10) == 70.0 and analysis.accuracy_at(rising, 30) == pytest.approx(82.0) and analysis.accuracy_at(rising, 50) is None
+    assert analysis.rounds_to_reach(rising, 60.0) == pytest.approx(5.0) and analysis.rounds_to_reach(rising, 80.0) == pytest.approx(20.0)
+    assert analysis.rounds_to_reach(rising, 50.0) == 0.0 and analysis.rounds_to_reach(rising, 90.0) is None
+    # Trapezoids: (50+70)/2*10 + (70+80)/2*10 = 1350 over 20 rounds.
+    assert analysis.mean_accuracy(rising, 20) == pytest.approx(67.5) and analysis.mean_accuracy(rising, 60) is None
+    assert analysis.mean_accuracy(rising, 30) == pytest.approx((1350 + 810) / 30)
+
+
+def test_step_size_control():
+    first = {"A-b0": {42: 86.0}, "C-b0": {42: 87.8}, "Ax2-b0": {42: 87.7}, "Ax3-b0": {42: 88.6}}
+    result = analysis.step_size_control(first)
+    assert result["explained"] is True and result["g_c"] == pytest.approx(1.8) and result["g_x3"] == pytest.approx(2.6) and result["matched_x2"] is None
+    matched = analysis.step_size_control({**first, "Cx2-b0": {42: 88.9}})
+    assert matched["matched_x2"] == pytest.approx(1.2) and matched["per_seed"][0]["matched_x2"] == pytest.approx(1.2)
+    assert analysis.step_size_control({"A-b0": {42: 86.0}, "C-b0": {42: 87.8}, "Ax2-b0": {42: 86.2}})["explained"] is False
+    assert analysis.step_size_control({"A-b0": {42: 86.0}, "C-b0": {42: 87.8}})["explained"] is None          # no control run
+    assert analysis.step_size_control({"A-b0": {42: 86.0}, "C-b0": {42: 85.0}, "Ax2-b0": {42: 87.0}})["explained"] is None   # nothing gained
+    assert analysis.step_size_control({"A-b0": {42: 86.0}})["seeds"] == []
+
+
+def test_sampling_speedup_with_and_without_zeroth_order_updates():
+    curves = {"A-b0": {42: curve((0, 55.0), (40, 71.0), (160, 86.0))}, "A-b0.75": {42: curve((0, 55.0), (40, 76.0), (160, 86.0))},
+              "B-b0": {42: curve((0, 55.0), (40, 70.8), (160, 85.8))}, "B-b0.75": {42: curve((0, 55.0), (40, 76.3), (160, 85.9))}}
+    result = analysis.sampling_speedup(curves, 40)
+    assert result["gain_zo_on"] == pytest.approx(5.0) and result["gain_zo_off"] == pytest.approx(5.5) and result["max_gap_on_off"] == pytest.approx(0.3)
+    assert analysis.sampling_speedup({"A-b0": curves["A-b0"]}, 40)["per_seed"] == []

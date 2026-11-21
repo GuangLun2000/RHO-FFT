@@ -190,6 +190,82 @@ def decide_h1(accuracy, planned_seeds=3):
     return result
 
 
+# --- speed of training and the controls added after the first session -------------------------------------------------
+#
+# After 160 rounds no arm has converged, so the final accuracy mostly measures how fast an arm learns. The helpers
+# below read a curve (rows of ``curve_rows``, ordered by round) and make that speed explicit.
+
+def accuracy_at(curve, round_id):
+    """Accuracy (%) at ``round_id``, linearly interpolated between evaluations; ``None`` outside the curve."""
+    for left, right in zip(curve, curve[1:]):
+        if left["round"] <= round_id <= right["round"]:
+            share = (round_id - left["round"]) / (right["round"] - left["round"])
+            return left["accuracy_pct"] + share * (right["accuracy_pct"] - left["accuracy_pct"])
+    return curve[0]["accuracy_pct"] if len(curve) == 1 and curve[0]["round"] == round_id else None
+
+
+def rounds_to_reach(curve, target):
+    """First round at which the accuracy reaches ``target`` (%), linearly interpolated; ``None`` if it never does."""
+    if curve and curve[0]["accuracy_pct"] >= target:
+        return float(curve[0]["round"])
+    for left, right in zip(curve, curve[1:]):
+        if left["accuracy_pct"] < target <= right["accuracy_pct"]:
+            share = (target - left["accuracy_pct"]) / (right["accuracy_pct"] - left["accuracy_pct"])
+            return left["round"] + share * (right["round"] - left["round"])
+    return None
+
+
+def mean_accuracy(curve, upto):
+    """Average of the accuracy over rounds 0 to ``upto`` (trapezoid rule); ``None`` if the curve ends earlier."""
+    end = accuracy_at(curve, upto)
+    if end is None or upto <= 0:
+        return None
+    points = [(row["round"], row["accuracy_pct"]) for row in curve if row["round"] < upto] + [(upto, end)]
+    return sum((b[0] - a[0]) * (a[1] + b[1]) / 2 for a, b in zip(points, points[1:])) / (upto - points[0][0])
+
+
+def step_size_control(accuracy):
+    """Does a larger server step alone reproduce the gain of first-order-only averaging (uniform sampling)?
+
+    Per seed: g_c = C - A; g_x2 = A x2 - A; g_x3 = A x3 - A; matched_x2 = C x2 - A x2, the two electorates at the
+    same server step. ``explained`` is true when the best step-size control reaches at least half of g_c, the
+    threshold of the brief (section 2.2); ``None`` when it cannot be computed or first-order-only averaging gained nothing.
+    """
+    seeds = _paired(accuracy, ["A-b0", "C-b0"])
+    rows = []
+    for seed in seeds:
+        value = lambda arm: accuracy.get(arm, {}).get(seed)  # noqa: E731
+        difference = lambda a, b: value(a) - value(b) if value(a) is not None and value(b) is not None else None  # noqa: E731
+        rows.append({"seed": seed, "g_c": difference("C-b0", "A-b0"), "g_x2": difference("Ax2-b0", "A-b0"),
+                     "g_x3": difference("Ax3-b0", "A-b0"), "matched_x2": difference("Cx2-b0", "Ax2-b0")})
+    result = {"seeds": seeds, "per_seed": rows}
+    result.update({key: _mean([row[key] for row in rows]) for key in ("g_c", "g_x2", "g_x3", "matched_x2")})
+    controls = [result[key] for key in ("g_x2", "g_x3") if result[key] is not None]
+    result["explained"] = max(controls) >= 0.5 * result["g_c"] if controls and result["g_c"] is not None and result["g_c"] > 0 else None
+    return result
+
+
+def sampling_speedup(curves, round_id):
+    """Gain of biased over uniform sampling at an early round, with the zeroth-order updates on (A) and off (B).
+
+    ``curves`` is ``{arm: {seed: curve}}``. If the gain is the same with the zeroth-order updates switched off, it
+    cannot come from lower zeroth-order variance. ``max_gap_on_off`` is the largest distance between the two
+    biased-sampling curves (A and B at beta 0.75) over the rounds both were evaluated at.
+    """
+    arms = ["A-b0", "A-b0.75", "B-b0", "B-b0.75"]
+    rows = []
+    for seed in _paired(curves, arms):
+        at = {arm: accuracy_at(curves[arm][seed], round_id) for arm in arms}
+        if any(value is None for value in at.values()):
+            continue
+        off = {row["round"]: row["accuracy_pct"] for row in curves["B-b0.75"][seed]}
+        gaps = [abs(row["accuracy_pct"] - off[row["round"]]) for row in curves["A-b0.75"][seed] if row["round"] in off]
+        rows.append({"seed": seed, "gain_zo_on": at["A-b0.75"] - at["A-b0"], "gain_zo_off": at["B-b0.75"] - at["B-b0"],
+                     "max_gap_on_off": max(gaps) if gaps else None})
+    return {"round": round_id, "per_seed": rows, "gain_zo_on": _mean([row["gain_zo_on"] for row in rows]),
+            "gain_zo_off": _mean([row["gain_zo_off"] for row in rows]), "max_gap_on_off": _mean([row["max_gap_on_off"] for row in rows])}
+
+
 def main(argv=None):
     import argparse
 

@@ -1,5 +1,5 @@
 {
-  "comment": "Arms of experiments E1b and E1c (brief section 7) plus the two bounds of E0, in queue order. Block 1 decides H1a, block 2 adds H1 and the bounds, block 3 completes the ladder.",
+  "comment": "Arms of experiments E1b and E1c (brief section 7) plus the two bounds of E0, in queue order. Block 1 decides H1a, block 2 adds H1 and the bounds, block 3 completes the ladder. Block 4 holds controls added after the first session (they depart from the no-tuning rule I5 on purpose and are never a proposed method): a larger server step for other arms, more zeroth-order directions, and longer training. Block 4 runs for the first seed of a session only; an arm with its own 'rounds' is scaled from the 160 rounds of the base.",
   "base": {"dataset": "ag_news", "partition": "dirichlet_05", "rounds": 160},
   "probe_rounds": "1,20,40,80,160",
   "arms": [
@@ -38,6 +38,27 @@
      "fields": {"method": "hofl", "beta": 0.0, "zo_mode": "off", "agg_electorate": "fo", "agg_weight": "count", "layer_stats": true}},
     {"name": "D-b0.75", "block": 3, "timing_key": "hofl-zo-off",
      "what": "fo_mean without zeroth-order updates, biased sampling",
-     "fields": {"method": "hofl", "beta": 0.75, "zo_mode": "off", "agg_electorate": "fo", "agg_weight": "count", "layer_stats": true}}
+     "fields": {"method": "hofl", "beta": 0.75, "zo_mode": "off", "agg_electorate": "fo", "agg_weight": "count", "layer_stats": true}},
+    {"name": "Cx2-b0", "block": 4, "timing_key": "hofl", "first_seed_only": true,
+     "what": "control: fo_mean with the server step doubled (compare with Ax2-b0: same step, different electorate)",
+     "fields": {"method": "hofl", "beta": 0.0, "agg_electorate": "fo", "agg_weight": "count", "server_lr": 2.0, "layer_stats": true}},
+    {"name": "Ax2-b0.75", "block": 4, "timing_key": "hofl", "first_seed_only": true,
+     "what": "control: baseline with biased sampling and the server step doubled",
+     "fields": {"method": "hofl", "beta": 0.75, "server_lr": 2.0, "layer_stats": true}},
+    {"name": "fedavg-x2", "block": 4, "timing_key": "fedavg", "first_seed_only": true,
+     "what": "control: FedAvg with the server step doubled (is the upper bound itself under-stepped?)",
+     "fields": {"method": "fedavg", "server_lr": 2.0}},
+    {"name": "A-b0-q8", "block": 4, "timing_key": "hofl-q8", "first_seed_only": true,
+     "what": "control: baseline with 8 zeroth-order directions instead of 2 (a better zeroth-order estimate)",
+     "fields": {"method": "hofl", "beta": 0.0, "q": 8, "layer_stats": true}},
+    {"name": "C-b0-r480", "block": 4, "timing_key": "hofl", "first_seed_only": true, "rounds": 480,
+     "what": "control: fo_mean, uniform sampling, three times as many rounds",
+     "fields": {"method": "hofl", "beta": 0.0, "agg_electorate": "fo", "agg_weight": "count", "evaluate_every": 20}},
+    {"name": "A-b0-r480", "block": 4, "timing_key": "hofl", "first_seed_only": true, "rounds": 480,
+     "what": "control: baseline, uniform sampling, three times as many rounds",
+     "fields": {"method": "hofl", "beta": 0.0, "evaluate_every": 20}},
+    {"name": "Ax3-b0-r480", "block": 4, "timing_key": "hofl", "first_seed_only": true, "rounds": 480,
+     "what": "control: baseline with the server step tripled, three times as many rounds",
+     "fields": {"method": "hofl", "beta": 0.0, "server_lr": 3.0, "evaluate_every": 20}}
   ]
 }
