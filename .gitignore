@@ -41,3 +41,5 @@ mirror*
 .DS_Store
 .pytest_cache/
 .ipynb_checkpoints/
+# The HO-FL paper under anonymous review: kept locally, never committed.
+33065_HO_FL_Hybrid_Order_Feder.pdf
