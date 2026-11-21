@@ -61,6 +61,26 @@ def git_head(repo):
     return sha + ("-dirty" if git("status", "--porcelain", "--untracked-files=no") else "")
 
 
+def hardware_slug(device):
+    """Names the device and torch version, e.g. ``tesla-t4-torch2.6.0``; timings and golden values are valid per slug."""
+    import re
+
+    import torch
+
+    name = torch.cuda.get_device_name(0) if device.startswith("cuda") and torch.cuda.is_available() else "cpu"
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") + "-torch" + torch.__version__.split("+")[0]
+
+
+def regression_verdict(parent, head, hardware):
+    """Verdicts of the P0 regression stage for this revision and hardware, if it was run under a sibling ``p0*`` root."""
+    for candidate in sorted(Path(parent).glob("p0*/regress/*/verdicts.json")):
+        verdicts = harness.read_json(candidate) or {}
+        if verdicts.get("head") == head and hardware in str(candidate):
+            return {"i1": {name: entry["verdict"] for name, entry in verdicts["i1"].items()}, "i2": verdicts["i2"]["verdict"],
+                    "golden_mode": verdicts.get("golden_mode"), "path": str(candidate)}
+    return None
+
+
 def gpu_memory():
     """``(used, total)`` memory of the first GPU in MiB, or ``None`` when ``nvidia-smi`` is not available."""
     if shutil.which("nvidia-smi") is None:
