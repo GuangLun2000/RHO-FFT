@@ -4,10 +4,12 @@
 Stages (finished runs under the same root are reused; nothing persists between sessions):
 
   base       one HO-FL run with the default settings whose last state is the common starting point  -> <root>/runs/
-  dose       schedule and fault files, then the arms in priority order under a time budget:
-             dose m (honest first-order reports next to the unreliable one) x aggregation rule x
-             {no fault, flip20, flip1}                                                               -> <root>/runs/
-  feedback   loss, accuracy and influence tables, the H2 computation and a bundle                   -> <root>/feedback/
+  cf         the counterfactual design (default): one 20-round trajectory from that state in which
+             every round every dose, aggregation rule and fault strength is formed from the same
+             reports (ho_fl/probes.py, dose_rows)                                                    -> <root>/runs/
+  dose       the full-arm design of the brief: one run per dose x rule x {no fault, flip20, flip1},
+             in priority order under a time budget; kept to check cells of the counterfactual       -> <root>/runs/
+  feedback   progress, influence and fallback tables, the H2 computations and a bundle              -> <root>/feedback/
 
 The arms are defined in ho_fl/dose.py. `--tiny` runs a reduced version on CPU with the synthetic tiny assets: a
 plumbing check whose numbers mean nothing. Run `experiments/p0/p0.py env golden regress` in the same session first.
@@ -52,6 +54,8 @@ class Context:
         self.head = grid.git_head(REPO)
         self.base_name = f"{self.model}-s{self.seed}-dose-base"
         self.base_dir = self.root / "runs" / self.base_name
+        self.m_traj = args.cf_dose
+        self.val_examples = 64 if args.tiny else args.val_examples
 
     def common(self, fields):
         if self.tiny:
@@ -97,6 +101,25 @@ def stage_base(ctx):
     return queue(ctx, [ctx.base_spec()], "base run") and harness.run_status(ctx.base_dir) == "COMPLETED"
 
 
+def cf_plan(ctx):
+    config = harness.read_json(ctx.base_dir / "config.json")
+    if harness.run_status(ctx.base_dir) != "COMPLETED" or not config:
+        return None, None
+    inputs = dose.write_inputs(ctx.root / "inputs", config["resource_cuts"], config["k"], ctx.seed, ctx.dose_rounds)
+    init_state = str(ctx.base_dir / "states" / f"round_{ctx.base_rounds:04d}.safetensors")
+    return inputs, dose.cf_spec(ctx.model, ctx.seed, inputs, init_state, BASE, m_traj=ctx.m_traj, val_examples=ctx.val_examples)
+
+
+def stage_cf(ctx):
+    inputs, spec = cf_plan(ctx)
+    if spec is None:
+        say("The base run is not complete; run the base stage first.")
+        return False
+    say(f"unreliable device: client {inputs['device']}; trajectory on the cohorts of dose m={ctx.m_traj}; {ctx.dose_rounds} rounds; "
+        f"every round all doses x {len(dose.COUNTERFACTUAL_RULES)} rules x {len(dose.COUNTERFACTUAL_FAULTS)} fault strengths")
+    return queue(ctx, [spec], "counterfactual dose-response")
+
+
 def stage_dose(ctx):
     inputs, plan = ctx.dose_specs()
     if plan is None:
@@ -110,6 +133,9 @@ def stage_dose(ctx):
 
 def collect(ctx):
     inputs, plan = ctx.dose_specs()
+    _, cf = cf_plan(ctx)
+    cf_rows = harness.read_jsonl(ctx.root / "runs" / cf["name"] / "dose_probe.jsonl") if cf else []
+    cf_summary = dose.cf_summary(cf_rows) if any(row.get("kind") == "reference" for row in cf_rows) else None
     arms = dose.collect(ctx.root / "runs", ctx.model, ctx.seed) if plan else {}
     base = harness.load_run(ctx.base_dir)
     timings = harness.read_json(ctx.root / f"timings-{ctx.hardware}.json", {})
@@ -126,7 +152,10 @@ def collect(ctx):
             "arms": [{"m": m, "aggregation": aggregation, "fault": fault, **outcome} for (m, aggregation, fault), outcome in sorted(arms.items())],
             "queue": harness.read_json(ctx.root / "queue_all.json"), "timings": timings,
             "wall_hours": sum(meta.get("wall_s") or 0 for meta in metas) / 3600,
-            "regression": grid.regression_verdict(ctx.root.parent, ctx.head, ctx.hardware)}
+            "regression": grid.regression_verdict(ctx.root.parent, ctx.head, ctx.hardware),
+            "cf": None if cf_summary is None else {"m_traj": ctx.m_traj, "status": harness.run_status(ctx.root / "runs" / cf["name"]),
+                                                   "summary": {**cf_summary, "table": [{"fault": f, "rule": r, "m": m, **v} for (f, r, m), v in sorted(cf_summary["table"].items())]},
+                                                   "h2": dose.decide_h2_cf(cf_summary), "errors": [row for row in cf_rows if row.get("kind") == "error"]}}
 
 
 def cell_table(rows, doses, text):
@@ -153,8 +182,12 @@ def render(data):
         "arms, sends its update on segment S1 negated (`flip1`) or negated and scaled by 20 (`flip20`). The dose m is the number of honest "
         "first-order reports on S1 next to it. `quorum_robust` is filled in from the arm it coincides with (`fo_robust` from m = 2 on, `robust_all` below). "
         "`quorum_hold` and `quorum_dilute` run without zeroth-order updates.")
+    if data["cf"]:
+        add(cf_section(data))
+    if data["tables"]:
+        add("\n## 3b. Full-arm design (20-round runs per cell)\n")
     for fault, rows in data["tables"].items():
-        add(f"\n## 3. Fault `{fault}`\n")
+        add(f"\n### Fault `{fault}`\n")
         add("Test loss after the arm, with the loss of the paired run without the fault in parentheses (lower is better):\n")
         add(cell_table(rows, doses, lambda c: f"DIVERGED" if c["status"] == "DIVERGED" else f"{c['loss']:.4f} ({fmt(c['clean_loss'], 4)})"))
         add("\nDamage: test loss with the fault minus test loss of the paired run:\n")
@@ -163,13 +196,14 @@ def render(data):
         add(cell_table(rows, doses, lambda c: "diverged" if c["status"] == "DIVERGED" else f"{c['accuracy_pct']:.2f}"))
         add("\nRelative influence on S1: how far the fault moved the aggregate, in units of what it moves the equal-weight mean (mean over rounds and layers):\n")
         add(cell_table(rows, doses, lambda c: fmt(c["influence_s1"], 2)))
-    add("\n## 4. Without the fault\n")
-    add("Test loss of the paired runs (the cost or gain of each rule when nothing is wrong):\n")
-    add(cell_table(data["clean"], doses, lambda c: "diverged" if c["status"] == "DIVERGED" else f"{c['loss']:.4f}"))
-    add("\n## 5. H2: the quorum crossover\n")
-    for fault, entry in data["h2"].items():
-        if fault in data["tables"]:
-            add(f"- `{fault}`: **{entry['verdict']}** (one seed, preliminary): {entry['reason']}.")
+    if data["tables"]:
+        add("\n## 4. Full-arm design without the fault\n")
+        add("Test loss of the paired runs (the cost or gain of each rule when nothing is wrong):\n")
+        add(cell_table(data["clean"], doses, lambda c: "diverged" if c["status"] == "DIVERGED" else f"{c['loss']:.4f}"))
+        add("\n## 5. H2 on the full-arm design\n")
+        for fault, entry in data["h2"].items():
+            if fault in data["tables"]:
+                add(f"- `{fault}`: **{entry['verdict']}** (one seed, preliminary): {entry['reason']}.")
     add("\n## 6. Queue, timing and GPU hours\n")
     queue_record = data["queue"]
     if queue_record:
@@ -189,8 +223,63 @@ def render(data):
     return "\n".join(out) + "\n"
 
 
+CF_RULE_TEXT = {"mean_all": "equal-weight mean of all reports (HO-FL)", "fo_diluted": "first-order reports only, divided by K",
+                "fo_mean": "mean of the first-order reports", "robust_all": "geometric median of all reports",
+                "fo_robust": "geometric median of the first-order reports", "quorum_robust": "quorum switching, falls back to all reports (zeroth-order as ballast)",
+                "quorum_hold": "quorum switching, holds S1 below the quorum", "quorum_dilute": "quorum switching, first-order sum / K below the quorum"}
+
+
+def cf_section(data):
+    cf, out = data["cf"], []
+    add = out.append
+    summary, h2 = cf["summary"], cf["h2"]
+    cells = {(row["fault"], row["rule"], row["m"]): row for row in summary["table"]}
+    doses = sorted({row["m"] for row in summary["table"]})
+    add("\n## 3. Counterfactual dose-response (one trajectory, every cell from the same reports)\n")
+    add(f"Trajectory on the cohorts of dose m={cf['m_traj']} ({cf['status']}), {summary['rounds']} rounds measured. Progress is the summed first-order "
+        "decrease of the loss on fixed evaluation examples on segment S1, in units of one honest first-order report applied alone "
+        "(1.0 = one normal first-order report, as in appendix B). Influence is the brief's relative influence of the faulty report on S1 "
+        "(1 for the equal-weight mean).\n")
+    for fault in dose.COUNTERFACTUAL_FAULTS:
+        add(f"\nFault `{fault}`" + (" (no fault)" if fault == "none" else "") + ": progress" + ("" if fault == "none" else " / influence") + "\n")
+        rows = []
+        for rule in dose.COUNTERFACTUAL_RULES:
+            row = [f"{rule}: {CF_RULE_TEXT[rule]}"]
+            for m in doses:
+                cell = cells.get((fault, rule, m))
+                if cell is None:
+                    row.append("n/a")
+                elif fault == "none":
+                    row.append(fmt(cell["progress"], 3))
+                else:
+                    row.append(f"{fmt(cell['progress'], 3)} / {fmt(cell['influence'], 2)}")
+            rows.append(row)
+        add(table(["rule", *[f"m={m} ({m + 1} first-order on S1)" for m in doses]], rows))
+    zo = summary.get("zo_vs_fo_on_s1")
+    if zo:
+        add(f"\nZeroth-order components on S1: a zeroth-order report lowers the evaluation loss by {zo['ratio']:+.3f} (± {fmt(zo['standard_error'], 3)}) "
+            "of what a first-order report of the same device does, per round, to first order.")
+    add("\nH2 on the counterfactual design:\n")
+    for fault, entry in h2.items():
+        add(f"- `{fault}`: **{entry['verdict']}** (one seed): {entry['reason']}."
+            + ("" if not entry["fallback_ranking_below_quorum"] else " Below the quorum the fallbacks rank "
+               + "; ".join(f"m={m}: " + " > ".join(ranking) for m, ranking in entry["fallback_ranking_below_quorum"].items()) + "."))
+    for error in cf["errors"]:
+        add(f"\nProbe error at round {error['round']}: {error['error']}")
+    return "\n".join(out)
+
+
 def findings(data):
     lines = []
+    if data["cf"]:
+        for fault, entry in data["cf"]["h2"].items():
+            lines.append(f"H2 on the counterfactual design under `{fault}`: {entry['verdict']}; {entry['reason']}.")
+            for m, ranking in entry["fallback_ranking_below_quorum"].items():
+                lines.append(f"Below the quorum (m={m}, `{fault}`) the fallback that keeps most progress is `{ranking[0]}`"
+                             + (" (zeroth-order reports as ballast help)" if ranking[0] == "quorum_robust" else " (zeroth-order ballast does not help here)") + ".")
+        zo = data["cf"]["summary"].get("zo_vs_fo_on_s1")
+        if zo:
+            lines.append(f"On S1 a zeroth-order report contributes {zo['ratio']:+.3f} (± {fmt(zo['standard_error'], 3)}) of a first-order report's first-order loss decrease.")
     if data["tiny"]:
         lines.append("This was the tiny dry run. It only shows that every stage executes; switch it off for real results.")
     if data["regression"] is None and not data["tiny"]:
@@ -228,21 +317,25 @@ def stage_feedback(ctx):
     (out / "feedback_P2.md").write_text(text)
     analysis.write_csv(out / "dose.csv", data["arms"])
     grid.write_bundle(ctx.root, out / "feedback_P2_bundle.zip")
-    say("H2: " + ", ".join(f"{fault} {entry['verdict']}" for fault, entry in data["h2"].items()) + f"; {data['finished_runs']} of {data['planned_runs']} arms finished"
+    say("H2 (counterfactual): " + (", ".join(f"{fault} {entry['verdict']}" for fault, entry in data["cf"]["h2"].items()) if data["cf"] else "not run")
+        + "; H2 (full arms): " + (", ".join(f"{fault} {entry['verdict']}" for fault, entry in data["h2"].items()) or "not run")
+        + f"; {data['finished_runs']} of {data['planned_runs']} full arms finished"
         if ctx.quiet else text)
     say(f"written: {out / 'feedback_P2.md'}, dose.csv and {out / 'feedback_P2_bundle.zip'}")
     return True
 
 
-STAGES = {"base": stage_base, "dose": stage_dose, "feedback": stage_feedback}
+STAGES = {"base": stage_base, "cf": stage_cf, "dose": stage_dose, "feedback": stage_feedback}
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("stages", nargs="+", choices=[*STAGES, "all"], help="one or more stages, run in the order given")
+    parser.add_argument("stages", nargs="+", choices=[*STAGES, "all"], help="one or more stages, run in the order given ('all' = base, cf, feedback)")
     parser.add_argument("--root", default="outputs/p2", help="directory that receives every result of the pipeline")
     parser.add_argument("--model", choices=["qwen", "opt"], default="qwen")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--cf-dose", type=int, default=2, help="counterfactual design: dose whose cohorts the trajectory uses")
+    parser.add_argument("--val-examples", type=int, default=1024, help="evaluation examples on which the probes measure the loss gradient")
     parser.add_argument("--doses", default="", help="comma-separated doses m in queue order (default 2,1,3,0,4,5: the predicted crossover first)")
     parser.add_argument("--faults", default="", help="comma-separated subset of none,flip20,flip1 (default all)")
     parser.add_argument("--jobs", type=int, default=1, help="runs that may share the GPU; limited further by the measured memory per run")
@@ -255,7 +348,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     ctx = Context(args)
     results = {}
-    for name in list(STAGES) if "all" in args.stages else args.stages:
+    # "all" is the default design: base, counterfactual, feedback. The full-arm stage runs only when named.
+    for name in ["base", "cf", "feedback"] if "all" in args.stages else args.stages:
         try:
             results[name] = bool(STAGES[name](ctx))
         except Exception as error:  # a broken stage must not hide the results of the others

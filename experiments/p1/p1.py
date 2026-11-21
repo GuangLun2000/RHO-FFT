@@ -9,10 +9,13 @@ Stages (finished runs under the same root are reused; nothing persists between s
   feedback   tables, the H1 and H1a computations, CSV files and a bundle   -> <root>/feedback/
 
 The arms are defined in arms.json. Block 1 holds the five runs that decide H1a, block 2 adds the runs for H1 and
-the two bounds, block 3 completes the ladder, block 4 holds the controls added after the first session (larger
-server step for other arms, more zeroth-order directions, longer training; first seed of the session only).
-`--tiny` replaces model and data by the synthetic tiny assets and runs on CPU: a plumbing check whose numbers
-mean nothing.
+the two bounds, block 3 completes the ladder; these ran in session 1 and are read from references/ instead of being
+trained again (runs are deterministic on a given GPU and library version). Block 4 holds controls added after
+session 1 (larger server step, longer training). Blocks 5 and 6 check the HO-FL authors' statements on the
+zeroth-order updates under the authors' settings (AG News, uniform highest boundary; SQuAD, Top-FO-Only); the
+numerical check of the zeroth-order estimator (`python -m ho_fl.zo_check`) writes into <root>/zo_check/ and is
+reported here too. `--tiny` replaces model and data by the synthetic tiny assets and runs on CPU (SQuAD arms are
+left out): a plumbing check whose numbers mean nothing.
 
 The baseline regression (invariants I1 and I2) is not repeated here: run `experiments/p0/p0.py env golden regress`
 in the same session before the queue.
@@ -39,17 +42,37 @@ REFERENCE = {
     "opt": {"A-b0": (59.58, 2.24), "A-b0.75": (62.85, 6.52), "fedavg": (78.24, 2.97), "decomfl": (23.38, 0.08)},
 }
 PLANNED_SEEDS = {"qwen": 3, "opt": 5}
+# What the HO-FL authors state about the zeroth-order updates, with their numbers (Qwen2.5-1.5B), and the arms of
+# this repository that reproduce each setting. "on" is HO-FL with zeroth-order updates, "off" the same with the
+# bottom frozen (zeroth-order updates off, direct averaging). Single runs of ours against the authors' 3-seed means.
+AUTHOR_STATEMENTS = [
+    {"key": "top_fo_only_ag_news", "source": "rebuttal to reviewer 76MC (Top-FO-Only, freeze bottom, beta=0.75)",
+     "task": "AG News Dirichlet 0.5, accuracy %", "metric": "accuracy", "authors_on": 86.69, "authors_off": 83.37, "on": "A-b0.75", "off": "B-b0.75"},
+    {"key": "top_fo_only_squad", "source": "rebuttal to reviewer 76MC (Top-FO-Only, freeze bottom, beta=0.75)",
+     "task": "SQuAD, full-validation F1", "metric": "f1", "authors_on": 86.92, "authors_off": 83.65, "on": "A-b0.75-squad", "off": "B-b0.75-squad"},
+    {"key": "uniform_boundary", "source": "paper Table 9 (HO-FL, uniform highest ZO boundary, beta=0)",
+     "task": "AG News Dirichlet 0.5, accuracy %", "metric": "accuracy", "authors_on": 63.22, "authors_off": None, "on": "Au24-b0", "off": "Bu24-b0"},
+    {"key": "pure_zo", "source": "paper Tables 2 and 9 (DeComFL, every layer zeroth-order)",
+     "task": "AG News Dirichlet 0.5, accuracy %", "metric": "accuracy", "authors_on": 55.83, "authors_off": None, "on": "decomfl", "off": None},
+]
+# Pre-registered reading of a Top-FO-Only comparison: the authors' drop is reproduced if ours is at least half of it.
+REPRODUCED_SHARE = 0.5
+# A drop of at least this many points when the zeroth-order updates are switched off counts as a contribution.
+CONTRIBUTION_POINTS = 1.0
 # Accuracy levels (%) used to express how fast an arm learns ("rounds to reach").
 TARGETS = {"qwen": (80.0, 85.0, 87.0), "opt": (40.0, 50.0, 60.0)}
 
 
-def hardware_slug(device):
-    import re
-
-    import torch
-
-    name = torch.cuda.get_device_name(0) if device.startswith("cuda") and torch.cuda.is_available() else "cpu"
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") + "-torch" + torch.__version__.split("+")[0]
+def load_references(model, directory=Path(__file__).parent / "references"):
+    """Runs of earlier sessions (see import_reference.py): ``[{"arm", "seed", "curve", ...}]`` for ``model``."""
+    found = []
+    for path in sorted(directory.glob("*.json")):
+        record = json.loads(path.read_text())
+        if record.get("model") != model:
+            continue
+        for arm, run in record["runs"].items():
+            found.append({**run, "arm": arm, "source": path.name, "revision": record.get("revision"), "hardware": record.get("hardware")})
+    return found
 
 
 class Context:
@@ -70,8 +93,9 @@ class Context:
         if self.tiny:
             from ho_fl.testing import build_tiny_assets
             self.assets = build_tiny_assets(self.root / "assets", datasets=("ag_news",))
-        self.hardware = hardware_slug(self.device)
+        self.hardware = grid.hardware_slug(self.device)
         self.head = grid.git_head(REPO)
+        self.references = [] if self.tiny else load_references(self.model)
 
     def common(self, fields):
         """Fields added to every run: where model and data come from and which device to use."""
@@ -89,8 +113,13 @@ def specs(ctx, blocks=None):
             for arm in ARMS["arms"]:
                 if bool(arm.get("first_seed_only")) != controls or (blocks is not None and arm["block"] not in blocks):
                     continue
+                if ctx.tiny and arm.get("dataset") == "squad":
+                    continue  # the tiny assets have no generation-ready SQuAD
                 rounds = ctx.rounds * arm.get("rounds", DEFAULT_ROUNDS) // DEFAULT_ROUNDS
                 fields = {"model": ctx.model, **ARMS["base"], **arm["fields"], "seed": seed, "rounds": rounds}
+                if fields.get("uniform_cut") == "highest":
+                    from ho_fl.config import SPECS
+                    fields["uniform_cut"] = max(SPECS[ctx.model][3])
                 if arm.get("probes"):
                     probe_rounds = [r for r in (int(part) for part in ARMS["probe_rounds"].split(",")) if r <= rounds]
                     fields["probe_rounds"] = ",".join(str(r) for r in sorted(set(probe_rounds) | {rounds}))
@@ -157,8 +186,22 @@ def collect(ctx):
                      "probe": analysis.probe_summary(probe) if probe else None,
                      "probe_errors": [r for r in probe if r.get("scope") == "error"],
                      "supply": supply.empirical(run_dir) if row["method"] == "hofl" else None})
+        runs[-1]["attribution"] = attribution(run_dir, spec["fields"])
         accuracy.setdefault(spec["arm"], {})[spec["seed"]] = row["final_accuracy_pct"]
         curves.setdefault(spec["arm"], {})[spec["seed"]] = runs[-1]["curve"]
+    # Arms of earlier sessions that this session did not train again.
+    for reference in ctx.references if ctx.rounds == DEFAULT_ROUNDS else []:
+        if reference["arm"] not in arms or reference["seed"] in accuracy.get(reference["arm"], {}):
+            continue
+        arm = arms[reference["arm"]]
+        row = {"run": f"{ctx.model}-s{reference['seed']}-{reference['arm']}", "arm": reference["arm"], "block": arm["block"], "what": arm["what"],
+               "seed": reference["seed"], "method": arm["fields"].get("method"), "rounds": reference["final_round"], "final_accuracy_pct": reference["final_accuracy_pct"],
+               "final_eval_loss": reference["final_eval_loss"], "final_f1": None, "forward_equivalents_per_round": None, "uplink_bytes_per_round": None,
+               "source": f"{reference['source']} (revision {str(reference['revision'])[:7]})", "hardware": reference["hardware"]}
+        curve = [{"run": row["run"], **point, "train_loss": None, "cumulative_uplink_bytes": None} for point in reference["curve"]]
+        runs.append({"summary": row, "dir": None, "curve": curve, "layers": None, "probe": None, "probe_errors": [], "supply": None, "attribution": None})
+        accuracy.setdefault(reference["arm"], {})[reference["seed"]] = row["final_accuracy_pct"]
+        curves.setdefault(reference["arm"], {})[reference["seed"]] = curve
     comparable = ctx.rounds == DEFAULT_ROUNDS and not ctx.tiny
     planned = PLANNED_SEEDS.get(ctx.model, 3)
     timings = harness.read_json(ctx.root / f"timings-{ctx.hardware}.json", {})
@@ -173,17 +216,59 @@ def collect(ctx):
             "supply_text": (ctx.root / "supply" / f"supply_{ctx.model}.txt").read_text() if (ctx.root / "supply" / f"supply_{ctx.model}.txt").exists() else None,
             "wall_hours": sum(meta.get("wall_s") or 0 for meta in metas) / 3600,
             "planned_runs": len(plan), "planned_seeds": planned,
-            "regression": regression_verdict(ctx)}
+            "regression": grid.regression_verdict(ctx.root.parent, ctx.head, ctx.hardware),
+            "zo_check": harness.read_json(ctx.root / "zo_check" / "zo_check.json"),
+            "canary": canary(runs, ctx), "statements": statements(runs)}
 
 
-def regression_verdict(ctx):
-    """Verdicts of the P0 regression stage for this revision and hardware, if it was run under the usual root."""
-    for candidate in sorted(ctx.root.parent.glob("p0*/regress/*/verdicts.json")):
-        verdicts = harness.read_json(candidate) or {}
-        if verdicts.get("head") == ctx.head and ctx.hardware in str(candidate):
-            return {"i1": {name: entry["verdict"] for name, entry in verdicts["i1"].items()}, "i2": verdicts["i2"]["verdict"],
-                    "golden_mode": verdicts.get("golden_mode"), "path": str(candidate)}
-    return None
+def attribution(run_dir, fields):
+    rows = harness.read_jsonl(Path(run_dir) / "attribution.jsonl")
+    return analysis.attribution_summary(rows, every=fields.get("attribution_every") or 1) if rows else None
+
+
+def final_metric(summary, metric):
+    return summary.get("final_f1") if metric == "f1" else summary.get("final_accuracy_pct")
+
+
+def statements(runs):
+    """The authors' statements on the zeroth-order updates next to ours (single runs; see AUTHOR_STATEMENTS)."""
+    by_arm = {}
+    for run in runs:
+        by_arm.setdefault(run["summary"]["arm"], run["summary"])
+    rows = []
+    for statement in AUTHOR_STATEMENTS:
+        on, off = by_arm.get(statement["on"]), by_arm.get(statement["off"]) if statement["off"] else None
+        ours_on = final_metric(on, statement["metric"]) if on else None
+        ours_off = final_metric(off, statement["metric"]) if off else None
+        entry = {**statement, "ours_on": ours_on, "ours_off": ours_off,
+                 "sources": [run.get("source", "this session") for run in (on, off) if run]}
+        authors_drop = statement["authors_on"] - statement["authors_off"] if statement["authors_off"] is not None else None
+        ours_drop = ours_on - ours_off if ours_on is not None and ours_off is not None else None
+        entry.update(authors_drop=authors_drop, ours_drop=ours_drop)
+        if ours_on is None or (statement["off"] and ours_off is None):
+            entry["verdict"] = "NOT_RUN"
+        elif authors_drop is not None:
+            entry["verdict"] = "REPRODUCED" if ours_drop >= REPRODUCED_SHARE * authors_drop else "NOT_REPRODUCED"
+        elif ours_drop is not None:
+            entry["verdict"] = "ZO_CONTRIBUTES" if ours_drop >= CONTRIBUTION_POINTS else "NO_MEASURABLE_CONTRIBUTION"
+        else:
+            entry["verdict"] = "REPORTED"
+        rows.append(entry)
+    return rows
+
+
+def canary(runs, ctx):
+    """A-b0.75-attr trains exactly like A-b0.75 of session 1; identical curves show that pairing across sessions holds."""
+    current = next((run for run in runs if run["summary"]["arm"] == "A-b0.75-attr" and run["dir"]), None)
+    reference = next((ref for ref in ctx.references if ref["arm"] == "A-b0.75" and ref["seed"] == (current or {}).get("summary", {}).get("seed")), None)
+    if current is None or reference is None:
+        return None
+    ours = {round(point["round"]): (round(point["accuracy_pct"], 2), round(point["eval_loss"], 4)) for point in current["curve"]}
+    theirs = {point["round"]: (point["accuracy_pct"], point["eval_loss"]) for point in reference["curve"]}
+    common = sorted(set(ours) & set(theirs))
+    differing = [r for r in common if ours[r] != theirs[r]]
+    return {"rounds_compared": len(common), "differing_rounds": differing, "identical": bool(common) and not differing,
+            "same_hardware": reference["hardware"] == ctx.hardware, "reference_revision": reference["revision"]}
 
 
 def accuracy_table(data):
@@ -194,15 +279,21 @@ def accuracy_table(data):
         if not members:
             rows.append([arm["name"], arm["what"], "not run", "", "", "", "", "", ""])
             continue
-        values = [row["final_accuracy_pct"] for row in members]
+        values = [row["final_accuracy_pct"] if row["final_accuracy_pct"] is not None else row.get("final_f1") for row in members]
         paper = reference.get(arm["name"])
-        rows.append([arm["name"], arm["what"], ", ".join(str(row["seed"]) for row in members), ", ".join(f"{v:.2f}" for v in values),
-                     f"{statistics.mean(values):.2f}", fmt(statistics.mean(row["final_eval_loss"] for row in members), 4),
-                     fmt(statistics.mean(row["forward_equivalents_per_round"] for row in members), 1),
-                     fmt(statistics.mean(row["uplink_bytes_per_round"] for row in members) / 1e6, 2),
-                     f"{paper[0]:.2f} ({paper[1]:.2f})" if paper else ""])
+
+        def mean_of(key, scale=1.0, digits=2):
+            present = [row[key] for row in members if row.get(key) is not None]
+            return fmt(statistics.mean(present) / scale, digits) if present else "n/a"
+
+        label = arm["name"] + (" (F1)" if members[0].get("final_accuracy_pct") is None else "")
+        sources = sorted({row.get("source", "this session") for row in members})
+        rows.append([label, arm["what"], ", ".join(str(row["seed"]) for row in members), ", ".join(f"{v:.2f}" if v is not None else "n/a" for v in values),
+                     f"{statistics.mean(v for v in values if v is not None):.2f}" if any(v is not None for v in values) else "n/a",
+                     mean_of("final_eval_loss", digits=4), mean_of("forward_equivalents_per_round", digits=1), mean_of("uplink_bytes_per_round", 1e6, 2),
+                     f"{paper[0]:.2f} ({paper[1]:.2f})" if paper else "", "; ".join(sources)])
     return table(["arm", "what it is", "seeds", "final accuracy % per seed", "mean", "eval loss", "forward-eq. per round",
-                  "uplink MB per round", "paper (sd)"], rows)
+                  "uplink MB per round", "paper (sd)", "result from"], rows)
 
 
 def speed_table(data):
@@ -261,7 +352,10 @@ def render(data):
     else:
         add(f"I1: {regression['i1']} (golden mode: {regression['golden_mode']}); I2 replay: {regression['i2']}.")
 
-    add("\n## 2. E1c: ablation ladder\n")
+    add("\n## 2. Do the zeroth-order updates help? The HO-FL authors' statements next to ours\n")
+    add(zo_section(data))
+
+    add("\n## 2b. E1c: ablation ladder\n")
     add(accuracy_table(data))
     add("\nForward-equivalents: one forward pass through all blocks for one batch; a backward pass costs two (accounting model, not a measurement).")
     add("\nSpeed of learning. No arm has converged after the base number of rounds, so the final accuracy largely measures speed:\n")
@@ -375,12 +469,85 @@ def render(data):
     return "\n".join(out) + "\n"
 
 
+def zo_section(data):
+    out = []
+    add = out.append
+    show = lambda value, digits=2: "n/a" if value is None else f"{value:.{digits}f}"  # noqa: E731
+    signed = lambda value: "n/a" if value is None else f"{value:+.2f}"  # noqa: E731
+    add("Authors' numbers are 3-seed means (Qwen2.5-1.5B); ours are single runs of seed 42 under the same settings. "
+        f"A Top-FO-Only drop counts as reproduced if ours is at least {REPRODUCED_SHARE:.0%} of the authors'; without an authors' "
+        f"number, switching the zeroth-order updates off has to cost at least {CONTRIBUTION_POINTS:g} point to count as a contribution.\n")
+    add(table(["statement (source)", "task and metric", "authors: ZO on / off (drop)", "ours: ZO on / off (drop)", "verdict", "our results from"],
+              [[s["source"], s["task"], f"{show(s['authors_on'])} / {show(s['authors_off'])} ({signed(s['authors_drop'])})",
+                f"{show(s['ours_on'])} / {show(s['ours_off'])} ({signed(s['ours_drop'])})", s["verdict"], "; ".join(s["sources"]) or ""]
+               for s in data["statements"]]))
+    canary_record = data.get("canary")
+    if canary_record:
+        add(f"\nCross-session check: A-b0.75-attr (this session) against A-b0.75 (session 1, revision {str(canary_record['reference_revision'])[:7]}): "
+            + (f"identical at all {canary_record['rounds_compared']} evaluations, so results of the two sessions can be paired."
+               if canary_record["identical"] else f"DIFFERENT at rounds {canary_record['differing_rounds'][:8]}"
+               + (" (same GPU model and torch version)" if canary_record["same_hardware"] else " (different GPU or torch version)")
+               + "; pair only arms trained in this session."))
+    attributed = [run for run in data["runs"] if run.get("attribution")]
+    if attributed:
+        add("\nAttribution: first-order decrease of the loss on 1,024 fixed evaluation examples, summed over the measured rounds (every "
+            "4th), split into the part due to first-order and to zeroth-order components of the applied update. A zeroth-order share "
+            "near 0 within its standard error means the zeroth-order components did not lower the loss.\n")
+        rows = []
+        for run in attributed:
+            for entry in run["attribution"]["segments"]:
+                rows.append([run["summary"]["arm"], f"S{entry['segment']}", show(entry.get("n_fo"), 1), show(entry.get("n_zo"), 1),
+                             f"{entry.get('pred_fo', 0):.4g}" if entry.get("pred_fo") is not None else "n/a",
+                             f"{entry.get('pred_zo', 0):.4g}" if entry.get("pred_zo") is not None else "n/a",
+                             (f"{entry['zo_share']:+.3f} ± {entry['zo_share_se']:.3f}" if entry.get("zo_share_se") is not None else show(entry.get("zo_share"), 3)),
+                             fmt(entry.get("cos_fo"), 3), fmt(entry.get("cos_zo"), 3)])
+        add(table(["arm", "segment", "first-order reports", "zeroth-order reports", "predicted decrease, first-order part",
+                   "predicted decrease, zeroth-order part", "zeroth-order share (± se)", "cosine first-order part", "cosine zeroth-order part"], rows))
+        for run in attributed:
+            check = run["attribution"]["first_order_check"]
+            if check:
+                add(f"\nFirst-order check for {run['summary']['arm']}: measured change of the evaluation loss {check['actual_change']:+.4f}, "
+                    f"predicted {check['predicted_change']:+.4f} over {check['intervals']} intervals (correlation {fmt(check['correlation'], 2)}).")
+    check = data.get("zo_check")
+    if check:
+        add("\nNumerical check of the zeroth-order estimator (no training): HO-FL's scalar v / mu against the exact directional derivative "
+            "from autograd, on the directions training draws. Correlation and slope 1 mean the finite difference is accurate. The last "
+            "column is the cosine of the q-direction estimate with the gradient: HO-FL's / built from exact derivatives / theory sqrt(q/d).\n")
+        rows = []
+        for row in check["rows"]:
+            information = {entry["q"]: entry for entry in row["information"]}
+            def cell(q):
+                entry = information.get(q)
+                return "n/a" if entry is None else f"{entry['cosine_hofl']:.4f} / {entry['cosine_exact_derivatives']:.4f} / {entry['theory']:.4f}"
+            rows.append([row["state"], row["precision"], f"{row['mu']:g}", row["cut"], row["directions"], fmt(row["correlation"], 3), fmt(row["slope"], 3),
+                         fmt(row["sign_agreement"], 3), cell(2), cell(max(information))])
+        add(table(["state", "backbone", "mu", "cut", "directions", "correlation", "slope", "sign agreement", "cosine q=2", f"cosine q={check['q']}"], rows))
+    return "\n".join(out)
+
+
 def findings(data):
     lines = []
     if data["tiny"]:
         lines.append("This was the tiny dry run. It only shows that every stage executes; switch it off for real results.")
     if data["regression"] is None and not data["tiny"]:
         lines.append("Run the baseline regression (P0 stages env, golden, regress) in the same session: these results build on I1.")
+    for statement in data["statements"]:
+        if statement["verdict"] in ("REPRODUCED", "NOT_REPRODUCED", "ZO_CONTRIBUTES", "NO_MEASURABLE_CONTRIBUTION"):
+            lines.append(f"Zeroth-order updates, {statement['source']}, {statement['task']}: {statement['verdict']} "
+                         f"(ours {statement['ours_drop']:+.2f} when switched off" + (f", authors {statement['authors_drop']:+.2f}" if statement["authors_drop"] is not None else "") + ").")
+    canary_record = data.get("canary")
+    if canary_record and not canary_record["identical"]:
+        lines.append("A-b0.75-attr did not reproduce session 1: results of the two sessions must not be paired; compare only arms of this session.")
+    check = data.get("zo_check")
+    if check:
+        bf16 = [row for row in check["rows"] if row["precision"] == "bfloat16" and row["mu"] == 1e-3 and row["correlation"] is not None]
+        fp32 = [row for row in check["rows"] if row["precision"] == "float32" and row["mu"] == 1e-3 and row["correlation"] is not None]
+        if bf16:
+            lines.append(f"Zeroth-order estimator at the training setting (bfloat16, mu=1e-3): correlation with the exact derivative "
+                         f"{min(row['correlation'] for row in bf16):.3f} to {max(row['correlation'] for row in bf16):.3f} over cuts and states"
+                         + (f"; float32 reference {min(row['correlation'] for row in fp32):.3f} to {max(row['correlation'] for row in fp32):.3f}" if fp32 else "")
+                         + ". Close to 1: the finite difference is accurate and any weakness of the zeroth-order part is its information per step; "
+                           "well below 1 in bfloat16 only: precision limits it.")
     elif data["regression"] and (not all(v.startswith("PASS") for v in data["regression"]["i1"].values()) or data["regression"]["i2"] != "PASS"):
         lines.append("The baseline regression did not pass in this session. Treat every number in this report as unverified until it does.")
     reference = REFERENCE.get(data["model"], {}) if data["comparable"] else {}
@@ -444,7 +611,7 @@ def stage_feedback(ctx):
     harness.write_json(out / "feedback_P1.json", data)
     text = render(data)
     (out / "feedback_P1.md").write_text(text)
-    run_dirs = [run["dir"] for run in data["runs"]]
+    run_dirs = [run["dir"] for run in data["runs"] if run["dir"]]
     analysis.write_csv(out / "summary.csv", [run["summary"] for run in data["runs"]])
     analysis.write_csv(out / "curves.csv", [row for run_dir in run_dirs for row in analysis.curve_rows(run_dir)])
     analysis.write_csv(out / "layers.csv", [row for run_dir in run_dirs for row in analysis.log_rows(run_dir, "layers.jsonl")])
@@ -465,7 +632,7 @@ def main(argv=None):
     parser.add_argument("--root", default="outputs/p1", help="directory that receives every result of the pipeline")
     parser.add_argument("--model", choices=["qwen", "opt"], default="qwen")
     parser.add_argument("--seeds", default="42", help="comma-separated seeds; the queue goes seed by seed")
-    parser.add_argument("--blocks", default="1,2,3,4", help="blocks of arms.json to queue")
+    parser.add_argument("--blocks", default="5,6,4", help="blocks of arms.json to queue (blocks 1-3 ran in session 1 and come from references/)")
     parser.add_argument("--rounds", type=int, default=0, help="rounds per run (default 160; other values are not comparable with the paper)")
     parser.add_argument("--jobs", type=int, default=1, help="runs that may share the GPU; limited further by the measured memory per run")
     parser.add_argument("--device", default="cuda")

@@ -197,7 +197,8 @@ def run_queue(specs, *, root, tree, hardware, revision, common, deadline=None, j
 
     def solo_estimate(spec):
         fields = spec["fields"]
-        return harness.estimate_seconds(timings[spec["timing_key"]], fields["rounds"], default_evaluate_every(fields))
+        return harness.estimate_seconds(timings[spec["timing_key"]], fields["rounds"], default_evaluate_every(fields),
+                                        initial=fields.get("eval_initial", True))
 
     def work(spec, stop_at):
         output = root / "runs" / spec["name"]

@@ -63,6 +63,16 @@ CONTROLS = [
     ("Ax3-b0-r480", arm(AQUA, "published method, server step x3", SOLID, "D", True)),
 ]
 LONG = ("A-b0-r480", "C-b0-r480", "Ax3-b0-r480")
+ZO_CHECK = [
+    ("HO-FL default (beta = 0.75), heterogeneous boundaries", None),
+    ("A-b0.75", arm(BLUE, "zeroth-order updates on (published HO-FL)", SOLID)),
+    ("B-b0.75", arm(BLUE, "bottom frozen: Top-FO-Only of the rebuttal", marker="o")),
+    ("Every client at the highest boundary (beta = 0): only the top segment first-order", None),
+    ("Au24-b0", arm(ORANGE, "zeroth-order updates on (paper Table 9: 63.22)", SOLID)),
+    ("Bu24-b0", arm(ORANGE, "bottom frozen", marker="o")),
+    ("Every layer zeroth-order", None),
+    ("decomfl", arm(GRAY, "DeComFL (paper: 55.83)", DOTTED)),
+]
 
 
 def style(spec, scale=1.0):
@@ -118,7 +128,16 @@ def draw_panel(axis, curves, rows, metric, title, window=None, skip=()):
         axis.set_ylim(min(values) - margin, max(values) + margin)
 
 
-def draw_legend(axis, curves, rows, last_column):
+LADDER_NOTE = ("Solid = uniform sampling, dashed = biased sampling.\n"
+               "Hollow markers without a line = the same arm with the zeroth-order updates off;\n"
+               "where they sit on the line, switching them off changes nothing.\n"
+               "With several seeds: mean over seeds, single seeds thin behind it.")
+ZO_NOTE = ("Lines: zeroth-order updates on. Hollow markers without a line: the same run\n"
+           "with the bottom frozen (zeroth-order updates off, direct averaging);\n"
+           "where they sit on the line, the zeroth-order updates change nothing.")
+
+
+def draw_legend(axis, curves, rows, last_column, note=LADDER_NOTE):
     axis.set_axis_off()
     axis.set_xlim(0, 1)
     axis.set_ylim(len(rows) + 3.0, -0.6)
@@ -141,19 +160,16 @@ def draw_legend(axis, curves, rows, last_column):
             axis.text(1.0, y, f"{curves[key]['final']:.2f}" + (f" (n={seeds})" if seeds > 1 else "") if seeds else "not run",
                       fontsize=10, color=INK if seeds else GRAY, va="center", ha="right")
         y += 1.0
-    axis.text(0.0, y + 0.3, "Solid = uniform sampling, dashed = biased sampling.\n"
-                            "Hollow markers without a line = the same arm with the zeroth-order updates off;\n"
-                            "where they sit on the line, switching them off changes nothing.\n"
-                            "With several seeds: mean over seeds, single seeds thin behind it.",
+    axis.text(0.0, y + 0.3, note,
               fontsize=9, color=INK_2, va="top", linespacing=1.45)
 
 
-def figure_for(curves, rows, title, panels, out, last_column):
+def figure_for(curves, rows, title, panels, out, last_column, note=LADDER_NOTE):
     figure = plt.figure(figsize=(6.0 * len(panels) + 8.0, 6.6), facecolor=SURFACE)
     grid = figure.add_gridspec(1, len(panels) + 1, width_ratios=[1] * len(panels) + [1.38], left=0.04, right=0.995, top=0.86, bottom=0.10, wspace=0.17)
     for position, panel in enumerate(panels):
         draw_panel(figure.add_subplot(grid[0, position]), curves, rows, **panel)
-    draw_legend(figure.add_subplot(grid[0, len(panels)]), curves, rows, last_column)
+    draw_legend(figure.add_subplot(grid[0, len(panels)]), curves, rows, last_column, note)
     figure.suptitle(title, x=0.04, y=0.965, ha="left", fontsize=14, color=INK)
     figure.savefig(out, dpi=160, facecolor=SURFACE)
     plt.close(figure)
@@ -173,6 +189,10 @@ def main(feedback_json, out_dir):
         dict(metric="accuracy", title="Test accuracy (%), higher is better"),
         dict(metric="accuracy", title=f"Test accuracy (%), rounds {late[0]}-{late[1]} enlarged", window=late, skip=("decomfl",)),
         dict(metric="loss", title="Test loss, lower is better")], out_dir / "p1_curves.png", f"accuracy %\nat round {rounds}"))
+    if any(key in curves for key in ("Au24-b0", "Bu24-b0")):
+        written.append(figure_for(curves, ZO_CHECK, f"{header}: do the zeroth-order updates help?", [
+            dict(metric="accuracy", title="Test accuracy (%), higher is better"),
+            dict(metric="loss", title="Test loss, lower is better")], out_dir / "p1_zo_check.png", "final\naccuracy %", note=ZO_NOTE))
     if any(key in curves for key, spec in CONTROLS if spec and key not in dict(LADDER)):
         written.append(figure_for(curves, CONTROLS, f"{header}: controls (not proposed methods)", [
             dict(metric="accuracy", title=f"Test accuracy (%), {rounds}-round arms, rounds {late[0]}-{late[1]}", window=late, skip=LONG),

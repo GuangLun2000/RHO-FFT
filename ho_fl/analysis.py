@@ -10,6 +10,8 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
+
 from . import harness
 
 
@@ -42,6 +44,7 @@ def summary_row(run_dir):
             "sampler": config.get("sampler"), "aggregation": config.get("aggregation"), "zo_mode": config.get("zo_mode"),
             "server_lr": config.get("server_lr"), "rounds": config.get("rounds"), "status": run["status"],
             "final_accuracy_pct": 100 * summary["accuracy"] if "accuracy" in summary else None,
+            "final_f1": summary.get("f1"), "final_exact_match": summary.get("exact_match"),
             "final_eval_loss": summary.get("task_loss"), "final_train_loss": curve[-1].get("training_task_loss") if curve else None,
             "uplink_bytes_per_round": curve[-1]["cumulative_logical_uplink_bytes"] / rounds if curve and rounds else None,
             "forward_equivalents_per_round": sum(row.get("forward_equivalents") or 0 for row in ledger) / rounds if rounds else None,
@@ -264,6 +267,47 @@ def sampling_speedup(curves, round_id):
                      "max_gap_on_off": max(gaps) if gaps else None})
     return {"round": round_id, "per_seed": rows, "gain_zo_on": _mean([row["gain_zo_on"] for row in rows]),
             "gain_zo_off": _mean([row["gain_zo_off"] for row in rows]), "max_gap_on_off": _mean([row["max_gap_on_off"] for row in rows])}
+
+
+def attribution_summary(rows, every=1):
+    """First-order decrease of the evaluation loss attributed to first-order and zeroth-order components, per segment.
+
+    Rows come from ``attribution.jsonl`` (one per measured round and segment). ``pred_*`` are summed over the measured
+    rounds; the zeroth-order share is ``pred_zo / (pred_fo + pred_zo)`` with a standard error over rounds. The check
+    of the first-order approximation compares the change of the measured evaluation loss between consecutive
+    measurements with ``every`` times the predicted decrease of the earlier one (the rounds in between are not
+    measured, so this is a rough check).
+    """
+    by_segment = defaultdict(list)
+    for row in rows:
+        if row.get("kind") != "error" and "segment" in row:
+            by_segment[row["segment"]].append(row)
+    result = []
+    for segment, members in sorted(by_segment.items()):
+        decomposed = all(row["decomposed"] for row in members)
+        entry = {"segment": segment, "rounds": len(members), "decomposed": decomposed,
+                 "pred_total": sum(row["pred_total"] for row in members)}
+        if decomposed:
+            fo, zo = [row["pred_fo"] or 0.0 for row in members], [row["pred_zo"] or 0.0 for row in members]
+            entry.update(pred_fo=sum(fo), pred_zo=sum(zo), n_fo=_mean([row.get("n_fo") for row in members]), n_zo=_mean([row.get("n_zo") for row in members]),
+                         cos_fo=_mean([row["cos_fo"] for row in members]), cos_zo=_mean([row["cos_zo"] for row in members]),
+                         norm_fo=_mean([row["norm_fo"] for row in members]), norm_zo=_mean([row["norm_zo"] for row in members]))
+            total = sum(fo) + sum(zo)
+            entry["zo_share"] = sum(zo) / total if total else None
+            entry["zo_share_se"] = (statistics.stdev(zo) * len(zo) ** 0.5 / abs(total)) if len(zo) > 1 and total else None
+        result.append(entry)
+    rounds = sorted({row["round"]: row["val_loss"] for rows_ in by_segment.values() for row in rows_}.items())
+    predicted = defaultdict(float)
+    for row in rows:
+        if row.get("kind") != "error" and "segment" in row:
+            predicted[row["round"]] += row["pred_total"]
+    pairs = [(rounds[index + 1][1] - loss, -every * predicted[round_id]) for index, (round_id, loss) in enumerate(rounds[:-1])]
+    check = None
+    if len(pairs) > 2:
+        actual, expected = np.array([pair[0] for pair in pairs]), np.array([pair[1] for pair in pairs])
+        check = {"intervals": len(pairs), "actual_change": float(actual.sum()), "predicted_change": float(expected.sum()),
+                 "correlation": float(np.corrcoef(actual, expected)[0, 1]) if actual.std() > 0 and expected.std() > 0 else None}
+    return {"segments": result, "first_order_check": check}
 
 
 def main(argv=None):

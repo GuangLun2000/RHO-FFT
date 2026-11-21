@@ -174,9 +174,10 @@ class Plan:
 
 def test_p1_arms_resolve_to_the_configurations_of_the_brief():
     specs = p1.specs(Plan())
-    # The ladder for both seeds (2 x 12), then the seven controls for the first seed only.
-    assert len(specs) == 31 and [s["arm"] for s in specs[:5]] == ["A-b0", "C-b0", "A-b0.75", "Ax2-b0", "Ax3-b0"] and specs[12]["seed"] == 43
-    assert len({s["name"] for s in specs}) == 31 and specs[0]["name"] == "qwen-s42-A-b0"
+    # The ladder for both seeds (2 x 12), then the arms of blocks 5, 6 and 4 for the first seed only.
+    assert len(specs) == 33 and [s["arm"] for s in specs[:5]] == ["A-b0", "C-b0", "A-b0.75", "Ax2-b0", "Ax3-b0"] and specs[12]["seed"] == 43
+    assert len({s["name"] for s in specs}) == 33 and specs[0]["name"] == "qwen-s42-A-b0"
+    assert [s["arm"] for s in specs[24:]] == ["A-b0.75-attr", "Au24-b0", "Bu24-b0", "A-b0.75-squad", "B-b0.75-squad", "Cx2-b0", "fedavg-x2", "C-b0-r480", "A-b0-r480"]
     resolved = {s["arm"]: Config(**s["fields"]).resolve() for s in specs[:12]}
     names = {arm: (cfg.aggregation_name, cfg.zo_mode, cfg.server_lr, cfg.beta) for arm, cfg in resolved.items()}
     assert names["A-b0"] == ("mean_all", "on", 1.0, 0.0) and names["A-b0.75"] == ("mean_all", "on", 1.0, 0.75)
@@ -194,15 +195,14 @@ def test_p1_arms_resolve_to_the_configurations_of_the_brief():
 
 def test_control_arms_run_for_the_first_seed_only_and_keep_everything_else_at_the_defaults():
     controls = p1.specs(Plan(), blocks=[4])
-    assert [s["arm"] for s in controls] == ["Cx2-b0", "Ax2-b0.75", "fedavg-x2", "A-b0-q8", "C-b0-r480", "A-b0-r480", "Ax3-b0-r480"]
-    assert {s["seed"] for s in controls} == {42} and controls[-1]["name"] == "qwen-s42-Ax3-b0-r480"
+    assert [s["arm"] for s in controls] == ["Cx2-b0", "fedavg-x2", "C-b0-r480", "A-b0-r480"]
+    assert {s["seed"] for s in controls} == {42} and controls[-1]["name"] == "qwen-s42-A-b0-r480"
     resolved = {s["arm"]: Config(**s["fields"]).resolve() for s in controls}
     settings = {arm: (cfg.aggregation_name, cfg.server_lr, cfg.beta, cfg.q, cfg.rounds, cfg.evaluate_every) for arm, cfg in resolved.items()}
-    assert settings["Cx2-b0"] == ("fo_mean", 2.0, 0.0, 2, 160, 10) and settings["Ax2-b0.75"] == ("mean_all", 2.0, 0.75, 2, 160, 10)
-    assert settings["A-b0-q8"] == ("mean_all", 1.0, 0.0, 8, 160, 10) and resolved["fedavg-x2"].method == "fedavg" and resolved["fedavg-x2"].server_lr == 2.0
-    assert settings["C-b0-r480"] == ("fo_mean", 1.0, 0.0, 2, 480, 20) and settings["Ax3-b0-r480"] == ("mean_all", 3.0, 0.0, 2, 480, 20)
+    assert settings["Cx2-b0"] == ("fo_mean", 2.0, 0.0, 2, 160, 10) and resolved["fedavg-x2"].method == "fedavg" and resolved["fedavg-x2"].server_lr == 2.0
+    assert settings["C-b0-r480"] == ("fo_mean", 1.0, 0.0, 2, 480, 20) and settings["A-b0-r480"] == ("mean_all", 1.0, 0.0, 2, 480, 20)
     assert all((cfg.E, cfg.k, cfg.lr, cfg.batch_size, cfg.zo_mode) == (5, 6, 1e-5, 16, "on") for cfg in resolved.values())
-    assert {s["timing_key"] for s in controls} == {"qwen/hofl", "qwen/fedavg", "qwen/hofl-q8"}
+    assert {s["timing_key"] for s in controls} == {"qwen/hofl", "qwen/fedavg"}
     short = Plan()
     short.rounds = 3
     tiny = {s["arm"]: s for s in p1.specs(short, blocks=[4])}
@@ -241,3 +241,59 @@ def test_sampling_speedup_with_and_without_zeroth_order_updates():
     result = analysis.sampling_speedup(curves, 40)
     assert result["gain_zo_on"] == pytest.approx(5.0) and result["gain_zo_off"] == pytest.approx(5.5) and result["max_gap_on_off"] == pytest.approx(0.3)
     assert analysis.sampling_speedup({"A-b0": curves["A-b0"]}, 40)["per_seed"] == []
+
+
+def test_zeroth_order_checks_reproduce_the_authors_settings():
+    checks = {s["arm"]: s for s in p1.specs(Plan(), blocks=[5, 6])}
+    assert list(checks) == ["A-b0.75-attr", "Au24-b0", "Bu24-b0", "A-b0.75-squad", "B-b0.75-squad"] and {s["seed"] for s in checks.values()} == {42}
+    resolved = {arm: Config(**spec["fields"]).resolve() for arm, spec in checks.items()}
+    # A-b0.75-attr is configured exactly like A-b0.75 of session 1, read-only probes included, plus the (read-only)
+    # attribution probe, so the two trainings must be identical.
+    ladder = {s["arm"]: s for s in p1.specs(Plan(), blocks=[1]) if s["seed"] == 42}
+    assert {key: value for key, value in checks["A-b0.75-attr"]["fields"].items() if key != "attribution_every"} == ladder["A-b0.75"]["fields"]
+    assert resolved["A-b0.75-attr"].attribution_every == 4 and resolved["A-b0.75-attr"].aggregation_name == "mean_all"
+    # The paper's uniform highest boundary (24 for Qwen), with and without zeroth-order updates.
+    assert (resolved["Au24-b0"].uniform_cut, resolved["Au24-b0"].beta, resolved["Au24-b0"].zo_mode, resolved["Au24-b0"].aggregation_name) == (24, 0.0, "on", "mean_all")
+    assert (resolved["Bu24-b0"].uniform_cut, resolved["Bu24-b0"].zo_mode, resolved["Bu24-b0"].aggregation_name) == (24, "off", "fo_diluted")
+    # The rebuttal's Top-FO-Only on SQuAD: same federated settings, beta 0.75, only the final full-validation evaluation.
+    for arm, zo in (("A-b0.75-squad", "on"), ("B-b0.75-squad", "off")):
+        cfg = resolved[arm]
+        assert (cfg.dataset, cfg.partition, cfg.beta, cfg.zo_mode, cfg.rounds, cfg.evaluate_every, cfg.eval_initial) == ("squad", "iid", 0.75, zo, 160, 160, False)
+        assert (cfg.E, cfg.q, cfg.k, cfg.lr, cfg.batch_size, cfg.sampler) == (5, 2, 6, 1e-5, 16, "dep_round_v1")
+    assert checks["A-b0.75-squad"]["timing_key"] == checks["B-b0.75-squad"]["timing_key"] == "qwen/hofl-squad"
+    tiny = Plan()
+    tiny.model, tiny.tiny, tiny.rounds = "opt", True, 3
+    small = {s["arm"]: s for s in p1.specs(tiny, blocks=[5, 6])}
+    assert list(small) == ["A-b0.75-attr", "Au24-b0", "Bu24-b0"] and small["Au24-b0"]["fields"]["uniform_cut"] == 9
+
+
+def test_author_statements_and_the_cross_session_check():
+    def summary(arm, accuracy=None, f1=None, source=None):
+        row = {"arm": arm, "seed": 42, "final_accuracy_pct": accuracy, "final_f1": f1}
+        return {"summary": {**row, **({"source": source} if source else {})}, "dir": "x" if source is None else None, "curve": []}
+    runs = [summary("A-b0.75", 85.99, source="v1"), summary("B-b0.75", 85.95, source="v1"), summary("A-b0.75-squad", f1=86.9),
+            summary("B-b0.75-squad", f1=83.0), summary("Au24-b0", 63.0), summary("Bu24-b0", 62.5)]
+    verdicts = {row["key"]: row for row in p1.statements(runs)}
+    assert verdicts["top_fo_only_ag_news"]["verdict"] == "NOT_REPRODUCED" and verdicts["top_fo_only_ag_news"]["ours_drop"] == pytest.approx(0.04)
+    assert verdicts["top_fo_only_squad"]["verdict"] == "REPRODUCED" and verdicts["top_fo_only_squad"]["authors_drop"] == pytest.approx(3.27)
+    assert verdicts["uniform_boundary"]["verdict"] == "NO_MEASURABLE_CONTRIBUTION" and verdicts["pure_zo"]["verdict"] == "NOT_RUN"
+    assert verdicts["top_fo_only_ag_news"]["sources"] == ["v1", "v1"]
+
+    class Ctx:
+        hardware = "gpu-x"
+        references = [{"arm": "A-b0.75", "seed": 42, "hardware": "gpu-x", "revision": "abc",
+                       "curve": [{"round": 0, "accuracy_pct": 55.8, "eval_loss": 1.1707}, {"round": 10, "accuracy_pct": 61.2, "eval_loss": 1.0}]}]
+    current = {"summary": {"arm": "A-b0.75-attr", "seed": 42}, "dir": "x",
+               "curve": [{"round": 0, "accuracy_pct": 55.80000001, "eval_loss": 1.17071}, {"round": 10, "accuracy_pct": 61.2, "eval_loss": 1.0}]}
+    assert p1.canary([current], Ctx())["identical"] is True
+    current["curve"][1]["accuracy_pct"] = 61.3
+    assert p1.canary([current], Ctx())["differing_rounds"] == [10]
+    assert p1.canary([], Ctx()) is None
+
+
+def test_session_one_references_were_imported_completely():
+    references = {ref["arm"]: ref for ref in p1.load_references("qwen")}
+    assert set(references) == {"A-b0", "C-b0", "A-b0.75", "Ax2-b0", "Ax3-b0", "B-b0", "B-b0.75", "fedavg", "decomfl", "C-b0.75", "D-b0", "D-b0.75"}
+    assert all(len(ref["curve"]) == 17 and ref["final_round"] == 160 and ref["seed"] == 42 for ref in references.values())
+    assert (references["A-b0.75"]["final_accuracy_pct"], references["B-b0.75"]["final_accuracy_pct"], references["decomfl"]["final_accuracy_pct"]) == (85.99, 85.95, 55.7)
+    assert p1.load_references("opt") == []

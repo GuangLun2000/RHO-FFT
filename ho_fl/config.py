@@ -61,6 +61,11 @@ class Config:
     fault_spec: str = ""
     on_nonfinite: str = "raise"
     per_class_eval: bool = False
+    uniform_cut: int = 0
+    eval_initial: bool = True
+    attribution_every: int = 0
+    dose_probe: bool = False
+    probe_val_examples: int = 1024
 
     @property
     def betas(self):
@@ -102,6 +107,8 @@ class Config:
             parts.append(f"tier_quota {self.tier_quota} {self.in_tier}")
         if self.sampler == "schedule_file":
             parts.append("schedule_file")
+        if self.uniform_cut:
+            parts.append(f"uniform cut {self.uniform_cut}")
         if self.fault_spec:
             parts.append("faults")
         if self.aggregation_name != "mean_all":
@@ -164,6 +171,14 @@ class Config:
             raise ValueError("on_nonfinite is raise or stop")
         if (self.fault_spec or self.per_class_eval) and self.dataset == "squad":
             raise ValueError("Faults and per-class evaluation are defined for the classification datasets only")
+        if self.uniform_cut and (self.method != "hofl" or self.uniform_cut not in SPECS[self.model][3]):
+            raise ValueError("uniform_cut gives every client the same cut; it must be one of the model's tier cuts and needs method hofl")
+        if self.attribution_every < 0 or self.probe_val_examples < 1:
+            raise ValueError("attribution_every must be non-negative and probe_val_examples positive")
+        if self.dose_probe and (self.method != "hofl" or self.sampler != "schedule_file" or self.uniform_cut):
+            raise ValueError("dose_probe needs method hofl and the cohorts of a dose schedule (sampler schedule_file)")
+        if (self.attribution_every or self.dose_probe) and self.dataset == "squad":
+            raise ValueError("Probes are defined for the classification datasets only")
         return self
 
 

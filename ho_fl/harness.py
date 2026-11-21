@@ -172,35 +172,38 @@ def state_difference(path_a, path_b):
 def timing(progress):
     """Seconds per round, per evaluation and for start-up, from the progress times recorded by ``launch``.
 
-    Within a run the order of events is: start-up, evaluation of round 0, then for each round the local training
-    (its row appears in rounds.jsonl) followed, on evaluation rounds, by the evaluation (its row in curves.jsonl).
-    Returns ``None`` when the run did not get far enough.
+    Within a run the order of events is: start-up, evaluation of round 0 (unless the run skips it), then for each
+    round the local training (its row appears in rounds.jsonl) followed, on evaluation rounds, by the evaluation
+    (its row in curves.jsonl). Returns ``None`` when the run did not get far enough.
     """
     rounds = sorted((int(r), t) for r, t in progress.get("round_times", {}).items())
     evals = {int(r): t for r, t in progress.get("eval_times", {}).items()}
-    if not rounds or 0 not in evals:
+    if not rounds or (0 not in evals and len(rounds) < 2):
         return None
     round_durations, eval_durations = [], []
-    previous = evals[0]
+    previous = evals.get(0)
     for round_id, at in rounds:
-        round_durations.append(at - previous)
+        if previous is not None:
+            round_durations.append(at - previous)
         previous = at
         if round_id in evals:
             eval_durations.append(evals[round_id] - at)
             previous = evals[round_id]
     eval_s = statistics.median(eval_durations) if eval_durations else 0.0
-    return {"round_s": statistics.median(round_durations), "eval_s": eval_s,
-            "startup_s": max(0.0, evals[0] - eval_s), "rounds_measured": len(round_durations),
+    round_s = statistics.median(round_durations)
+    # Without an evaluation of round 0, start-up is what precedes the first round beyond one round's work.
+    startup_s = max(0.0, evals[0] - eval_s) if 0 in evals else max(0.0, rounds[0][1] - round_s)
+    return {"round_s": round_s, "eval_s": eval_s, "startup_s": startup_s, "rounds_measured": len(round_durations),
             "evaluations_measured": len(eval_durations)}
 
 
-def evaluation_count(rounds, evaluate_every):
-    """Number of evaluations of a run: round 0, every ``evaluate_every`` rounds and the last round."""
-    return 1 + sum(1 for r in range(1, rounds + 1) if r % evaluate_every == 0 or r == rounds)
+def evaluation_count(rounds, evaluate_every, initial=True):
+    """Number of evaluations of a run: round 0 (unless ``initial`` is off), every ``evaluate_every`` rounds and the last round."""
+    return int(initial) + sum(1 for r in range(1, rounds + 1) if r % evaluate_every == 0 or r == rounds)
 
 
-def estimate_seconds(timing_record, rounds, evaluate_every):
-    return (timing_record["startup_s"] + timing_record["eval_s"] * evaluation_count(rounds, evaluate_every)
+def estimate_seconds(timing_record, rounds, evaluate_every, initial=True):
+    return (timing_record["startup_s"] + timing_record["eval_s"] * evaluation_count(rounds, evaluate_every, initial)
             + timing_record["round_s"] * rounds)
 
 

@@ -17,7 +17,7 @@ from .data import load_manifest, load_tokens
 from .decomfl import CentralEstimator, local_step as decomfl_step
 from .io import append_jsonl, sha256, tensor_hash, write_json
 from .model import load_model, partition_parameters
-from .probes import Probes
+from .probes import Probes, replay_participation
 from .faults import Faults, influence_rows
 from .randomness import client_directions
 from .reports import ClientReport
@@ -34,7 +34,12 @@ class Backend:
         self.data = load_tokens(cfg, self.tokenizer)
         self.manifest, self.partition_id, self.manifest_bytes = load_manifest(cfg, self.data["train"])
         self.resource_cuts = [c["mixed_L_zo"] for c in self.manifest["clients"]]
-        self.cuts = self.resource_cuts if cfg.method == "hofl" else [SPECS[cfg.model][2] if cfg.method == "decomfl" else 0] * cfg.n
+        if cfg.method == "hofl":
+            # uniform_cut: every client trains with the same cut (the paper's "uniform boundary" variant); tiers keep
+            # their resource cut for bookkeeping.
+            self.cuts = [cfg.uniform_cut] * cfg.n if cfg.uniform_cut else self.resource_cuts
+        else:
+            self.cuts = [SPECS[cfg.model][2] if cfg.method == "decomfl" else 0] * cfg.n
         self.bottoms = {c: partition_parameters(self.params, c)[0] for c in set(self.cuts)}
         self.dimensions = {c: sum(p.numel() for p in bottom.values()) for c, bottom in self.bottoms.items()}
         self.estimator = CentralEstimator(self.params, cfg.mu, cfg.q) if cfg.method == "decomfl" else None
@@ -160,16 +165,7 @@ def clean_twin(b, state, report):
     no data stream advances and the token counters are put back (the parameters are restored by the caller's
     next step, as after any client).
     """
-    cfg, counters = b.cfg, (b.processed_tokens, b.answer_tokens)
-    directions = client_directions(cfg.seed, cfg.model, report.round, report.cid)
-    restore(b.params, state)
-    optimizer = b.optimizer()
-    for e, indices in enumerate(report.batches):
-        b.local_step(report.cid, indices, optimizer, directions, e, state, cut=report.cut, zo=report.zo)
-    with torch.no_grad():
-        delta = {name: param.detach() - state[name] for name, param in b.params.items()}
-    b.processed_tokens, b.answer_tokens = counters
-    return delta
+    return replay_participation(b, state, report)
 
 
 def run(cfg):
@@ -234,7 +230,8 @@ def run(cfg):
                     raise
                 return None
 
-        final, diverged = evaluate(0), None
+        # eval_initial=False skips the evaluation of the starting point; training is the same either way.
+        final, diverged = (evaluate(0) if cfg.eval_initial else {}), None
         for r in range(1, cfg.rounds + 1):
             if history is not None:
                 history.append({name: tensor.clone() for name, tensor in state.items()})
