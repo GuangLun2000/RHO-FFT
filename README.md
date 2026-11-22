@@ -27,7 +27,7 @@ first-order quorum, and scarcity-first uplink.
 | P3: deadlines (E4) | Not started. |
 
 Milestone reports and the implementation plan are in `docs/reports/` and `docs/plans/` (in Chinese); the reports
-brought back from Colab are in `colab_results_feedback/`.
+brought back from Colab are kept locally in `colab_results_feedback/` and are not part of the repository.
 
 ## Running the experiments on Colab
 
