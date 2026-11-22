@@ -150,12 +150,13 @@ def allowed_jobs(jobs, timings, keys, memory=None):
     return max(1, min(jobs, int(MEMORY_HEADROOM * memory[1] // max(max(peaks), 1.0))))
 
 
-def run_queue(specs, *, root, tree, hardware, revision, common, deadline=None, jobs=1, echo=say, run=harness.run_training):
+def run_queue(specs, *, root, tree, hardware, revision, common, deadline=None, jobs=1, echo=say, run=harness.run_training, on_finish=None):
     """Run ``specs`` in order under ``root`` and return the record of the queue (also written to ``queue.json``).
 
     A spec is ``{"name", "fields", "timing_key", ...}``; other keys are copied to its entry. ``common(fields)``
     returns the fields added to every run (device, cache directory). ``deadline`` is a ``time.time()`` value.
     Entry statuses: ``COMPLETED``, ``DIVERGED``, ``FAILED``, ``TIMEOUT``, ``SKIPPED_BUDGET``, ``SKIPPED_PREFLIGHT``.
+    ``on_finish(spec, entry)`` is called after each run that ended (also a reused one), e.g. to print its result.
     """
     root = Path(root)
     timings_path = root / f"timings-{hardware}.json"
@@ -165,20 +166,26 @@ def run_queue(specs, *, root, tree, hardware, revision, common, deadline=None, j
     def remaining():
         return float("inf") if deadline is None else deadline - time.time()
 
-    def start(fields, output, label, stop_at=None):
-        return run({**fields, **common(fields)}, output, tree=tree, label=label, revision=revision, echo=echo,
+    def start(fields, output, label, stop_at=None, quiet=False):
+        # A quiet run (the timing preflight) prints its start and end only, not its rounds.
+        shown = (lambda text="": None if str(text).startswith("    ") else echo(text)) if quiet else echo
+        return run({**fields, **common(fields)}, output, tree=tree, label=label, revision=revision, echo=shown,
                    extra_meta={"hardware": hardware}, stop_at=stop_at)
 
     # Phase 1: probe every cost profile that still has runs to do, one at a time, alone on the GPU.
+    announced = False
     for spec in specs:
         key = spec["timing_key"]
         if key in timings or key in failures or harness.run_status(root / "runs" / spec["name"]) in harness.FINISHED:
             continue
+        if not announced:
+            echo("  timing preflight: 3 rounds of each new cost profile, alone on the GPU; the results only set the time estimates")
+            announced = True
         if remaining() < 300:
             failures[key] = "less than five minutes of budget left"
             continue
         watch = MemoryWatch().start()
-        record = start(preflight_fields(spec["fields"]), root / "preflight" / hardware / key, f"preflight {key}")
+        record = start(preflight_fields(spec["fields"]), root / "preflight" / hardware / key, f"preflight {key}", quiet=True)
         peak = watch.stop()
         if record["status"] == "COMPLETED" and record.get("timing"):
             timings[key] = {**record["timing"], "peak_mb": peak, "source": "preflight"}
@@ -245,6 +252,7 @@ def run_queue(specs, *, root, tree, hardware, revision, common, deadline=None, j
                         echo(f"  [{spec['name']}] skipped: needs about {estimate / 60:.0f} min, {max(remaining(), 0) / 60:.0f} min of budget left")
                     else:
                         stop_at = None if deadline is None else deadline + GRACE_S
+                        echo(f"\n#### Run {position} of {len(specs)}: {spec['name']} (estimated {estimate / 60:.0f} min)")
                         running[pool.submit(work, spec, stop_at)] = (spec, entry, solo)
             if not running:
                 continue
@@ -265,9 +273,26 @@ def run_queue(specs, *, root, tree, hardware, revision, common, deadline=None, j
                         if solo and record.get("wall_s"):
                             observed.append(record["wall_s"] / solo)
                     harness.write_json(timings_path, timings)
+                if on_finish is not None:
+                    try:
+                        on_finish(spec, entry)
+                    except Exception as error:  # printing a result must never stop the queue
+                        echo(f"  (could not summarise {spec['name']}: {error!r})")
             write_record()
     write_record()
     return harness.read_json(record_path)
+
+
+def select_sections(text, keys):
+    """The sections of a report whose heading number is in ``keys`` (``## 2c. ...`` has the key ``2c``)."""
+    chunks, current = [], None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            current = line[3:].split(" ", 1)[0].rstrip(".")
+            chunks.append([current, [line]])
+        elif chunks:
+            chunks[-1][1].append(line)
+    return "\n".join("\n".join(lines) for key, lines in chunks if key in keys)
 
 
 def write_bundle(root, path, skip_directories=("trees", "assets", "hf-cache"), skip_suffixes=(".safetensors", ".gz", ".zip", ".tmp")):

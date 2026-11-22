@@ -32,7 +32,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 from ho_fl import analysis, grid, harness, supply  # noqa: E402
-from ho_fl.grid import fmt, say, table  # noqa: E402
+from ho_fl.grid import fmt, say, select_sections, table  # noqa: E402
 
 ARMS = json.loads((Path(__file__).parent / "arms.json").read_text())
 DEFAULT_ROUNDS = ARMS["base"]["rounds"]
@@ -94,6 +94,7 @@ class Context:
         self.jobs = max(1, args.jobs)
         self.deadline = args.deadline or (time.time() + 3600 * args.budget_hours if args.budget_hours else None)
         self.quiet = args.quiet
+        self.sections = [part.strip() for part in args.sections.split(",") if part.strip()]
         self.assets = {}
         if self.tiny:
             from ho_fl.testing import build_tiny_assets
@@ -155,24 +156,137 @@ def stage_supply(ctx):
 
 def stage_queue(ctx):
     plan = specs(ctx, ctx.blocks)
-    say(f"== queue ({ctx.model}, seeds {ctx.seeds}, blocks {ctx.blocks}, {len(plan)} runs of {ctx.rounds} rounds, "
-        f"up to {ctx.jobs} at a time, {ctx.hardware}) ==")
+    say(f"\n### Queue of blocks {', '.join(str(block) for block in ctx.blocks)}: {len(plan)} runs, {ctx.jobs} at a time, on {ctx.hardware}\n")
     from ho_fl.config import Config
     for spec in plan:  # every configuration is validated before anything is launched
         Config(**{**spec["fields"], **ctx.common(spec["fields"])}).resolve()
+    say(plan_table(ctx, plan))
     record = grid.run_queue(plan, root=ctx.root, tree=REPO, hardware=ctx.hardware, revision=ctx.head, common=ctx.common,
-                            deadline=ctx.deadline, jobs=ctx.jobs)
+                            deadline=ctx.deadline, jobs=ctx.jobs, on_finish=lambda spec, entry: say(run_result(ctx, spec, entry)))
     # The record of a queue covers the blocks of this call; keep the entries of the other blocks as they were.
     history = harness.read_json(ctx.root / "queue_all.json", {"entries": []})
     fresh = {entry["name"]: entry for entry in record["queue"]}
     history["entries"] = [fresh.pop(entry["name"], entry) for entry in history["entries"]] + list(fresh.values())
     history.update({key: record[key] for key in ("recorded_at", "hardware", "head", "jobs", "jobs_requested", "preflight_failures")})
     harness.write_json(ctx.root / "queue_all.json", history)
-    say()
+    say("\nQueue summary:\n")
     say(table(["run", "status", "wall min", "estimate min", "note"],
               [[e["name"], e["status"] + (" (reused)" if e.get("reused") else ""), fmt(e["wall_s"] / 60, 1) if e.get("wall_s") else "",
                 fmt(e["estimated_s"] / 60, 1) if e.get("estimated_s") else "", e.get("reason") or e.get("error") or ""] for e in record["queue"]]))
     return all(entry["status"] == "COMPLETED" for entry in record["queue"])
+
+
+# --- what is printed while the queue runs -----------------------------------------------------------------------------
+
+MODEL_NAMES = {"qwen": "Qwen2.5-1.5B", "opt": "OPT-125M"}
+SHOWN_BY_DEFAULT = ("model", "dataset", "partition", "rounds", "seed")
+
+
+def common_settings(ctx):
+    return (f"Common settings: {MODEL_NAMES.get(ctx.model, ctx.model)}, AG News with a Dirichlet 0.5 split over 30 clients, "
+            f"6 clients per round, 5 local steps, q = 2 zeroth-order directions, learning rate 1e-5, {ctx.rounds} rounds, "
+            f"seed {', '.join(str(seed) for seed in ctx.seeds)}. A run differs from these only by the settings listed.")
+
+
+def arm_settings(spec):
+    arm = next(arm for arm in ARMS["arms"] if arm["name"] == spec["arm"])
+    fields = {key: value for key, value in arm["fields"].items()}
+    if "fault_spec" in fields:
+        fields["fault_spec"] = Path(fields["fault_spec"]).name
+    if spec["fields"]["rounds"] != DEFAULT_ROUNDS:
+        fields["rounds"] = spec["fields"]["rounds"]
+    return ", ".join(f"{key}={value}" for key, value in fields.items() if key not in SHOWN_BY_DEFAULT or key == "rounds")
+
+
+def authors_number(arm_name):
+    for statement in AUTHOR_STATEMENTS:
+        for side in ("on", "off"):
+            if statement[side] == arm_name and statement[f"authors_{side}"] is not None:
+                return f"authors: {statement['authors_' + side]:.2f} ({statement['source'].split(' (')[0]})"
+    return ""
+
+
+def plan_table(ctx, plan):
+    """The runs of a queue as a table: what each run is, how it differs from the common settings, what it is read against."""
+    arms = {arm["name"]: arm for arm in ARMS["arms"]}
+    rows = [[spec["name"], arms[spec["arm"]]["what"], arm_settings(spec),
+             ", ".join(arms[spec["arm"]].get("compare", [])) + (f"; {authors_number(spec['arm'])}" if authors_number(spec["arm"]) else "")]
+            for spec in plan]
+    return common_settings(ctx) + "\n\n" + table(["run", "what it is", "settings", "read against"], rows)
+
+
+def find_run(ctx, arm, seed):
+    """A finished run of ``arm`` for ``seed``: from this session (``source`` "this session") or a reference of an earlier one."""
+    run_dir = ctx.root / "runs" / (f"{ctx.model}-s{seed}-{arm}" + ("" if ctx.rounds == DEFAULT_ROUNDS else f"-r{ctx.rounds}"))
+    if harness.run_status(run_dir) in harness.FINISHED:
+        return {"source": "this session", "curve": analysis.curve_rows(run_dir), "summary": analysis.summary_row(run_dir)}
+    for reference in ctx.references if ctx.rounds == DEFAULT_ROUNDS else []:
+        if reference["arm"] == arm and reference["seed"] == seed:
+            return {"source": f"{reference['source']} (earlier session)", "curve": reference["curve"],
+                    "summary": {"final_accuracy_pct": reference["final_accuracy_pct"], "final_f1": None}}
+    return None
+
+
+def run_result(ctx, spec, entry):
+    """What one finished run gave, printed right after it ends: final numbers, probes, and the comparison with the
+    arms it is read against (difference of the final metric, the cross-session check, the fault metrics)."""
+    name, status = spec["name"], entry.get("status")
+    head = f"\n**Result of {name}**: {status}" + (" (finished in an earlier call, reused)" if entry.get("reused") else "") \
+        + (f", {entry['wall_s'] / 60:.1f} min" if entry.get("wall_s") and not entry.get("reused") else "")
+    if status not in harness.FINISHED:
+        return head + (f". {entry.get('error')}" if entry.get("error") else ". See the end of its log above.")
+    run_dir = ctx.root / "runs" / name
+    curve, summary = analysis.curve_rows(run_dir), analysis.summary_row(run_dir)
+    lines = [head]
+    if summary.get("final_f1") is not None:
+        lines.append(f"- final F1 {summary['final_f1']:.4f}, exact match {fmt(summary.get('final_exact_match'), 4)} (one evaluation, full validation set)")
+    elif curve:
+        final, best = curve[-1], max(curve, key=lambda point: point["accuracy_pct"])
+        lines.append(f"- final test accuracy {final['accuracy_pct']:.2f}% at round {final['round']} (test loss {final['eval_loss']:.4f}); "
+                     f"best {best['accuracy_pct']:.2f}% at round {best['round']}")
+    diverged = (harness.read_json(run_dir / "summary.json", {}) or {}).get("diverged_round")
+    if diverged:
+        lines.append(f"- diverged in round {diverged}: the numbers above are the last finite evaluation")
+    attributed = harness.read_jsonl(run_dir / "attribution.jsonl")
+    if attributed:
+        result = analysis.attribution_summary(attributed, every=spec["fields"].get("attribution_every") or 1)
+        parts = [f"S{entry_['segment']} " + ("n/a" if entry_.get("zo_share") is None else f"{entry_['zo_share']:+.3f}"
+                                              + (f" ± {entry_['zo_share_se']:.3f}" if entry_.get("zo_share_se") is not None else ""))
+                 for entry_ in result["segments"]]
+        fo = sum(entry_.get("pred_fo") or 0.0 for entry_ in result["segments"])
+        zo = sum(entry_.get("pred_zo") or 0.0 for entry_ in result["segments"])
+        measured = len({row['round'] for row in attributed if 'segment' in row})
+        lines.append(f"- attribution over {measured} measured round{'s' if measured != 1 else ''}: zeroth-order share of the "
+                     f"predicted loss decrease {zo / (fo + zo):+.3f} overall" if fo + zo else "- attribution: no decrease predicted")
+        lines.append(f"  by segment (± se over rounds): {'; '.join(parts)}")
+    arm = next(arm for arm in ARMS["arms"] if arm["name"] == spec["arm"])
+    metric = "f1" if summary.get("final_f1") is not None else "accuracy"
+    ours = summary.get("final_f1") if metric == "f1" else summary.get("final_accuracy_pct")
+    for other in arm.get("compare", []):
+        found = find_run(ctx, other, spec["seed"])
+        if found is None:
+            lines.append(f"- against {other}: not available yet")
+            continue
+        theirs = found["summary"].get("final_f1") if metric == "f1" else found["summary"].get("final_accuracy_pct")
+        if ours is not None and theirs is not None:
+            unit = "" if metric == "f1" else " points"
+            lines.append(f"- against {other} ({found['source']}): {ours - theirs:+.2f}{unit} ({ours:.2f} against {theirs:.2f})")
+        if spec["arm"] == "A-b0.75-attr" and other == "A-b0.75":
+            check = canary([{"summary": {"arm": "A-b0.75-attr", "seed": spec["seed"]}, "dir": str(run_dir), "curve": curve}], ctx)
+            if check:
+                lines.append("  cross-session check: " + (f"identical at all {check['rounds_compared']} common evaluations, so the two sessions can be paired"
+                             if check["identical"] else f"DIFFERENT at rounds {check['differing_rounds'][:8]}: pair only runs of this session"))
+        if spec["fields"].get("fault_spec"):
+            metrics = analysis.resilience_metrics(curve, found["curve"], PILOT_WINDOW)
+            if metrics:
+                before = max((abs(drop) for r, drop in metrics["drops"] if r < PILOT_WINDOW[0]), default=None)
+                lines.append(f"  fault in rounds {PILOT_WINDOW[0]}-{PILOT_WINDOW[1]}: mean drop {metrics['mean_drop']:+.2f} points, largest "
+                             f"{metrics['max_drop']:+.2f} at round {metrics['max_drop_round']}, "
+                             + ("not recovered" if metrics["recovery_censored"] else f"recovered {metrics['recovery_rounds']} rounds after the window")
+                             + f", final gap {metrics['final_gap']:+.2f}; gap before the window {fmt(before, 2)} (must be 0)")
+    if authors_number(spec["arm"]):
+        lines.append(f"- {authors_number(spec['arm'])}, 3-seed mean")
+    return "\n".join(lines)
 
 
 # --- feedback -------------------------------------------------------------------------------------------------------
@@ -699,8 +813,11 @@ def stage_feedback(ctx):
     analysis.write_csv(out / "layers.csv", [row for run_dir in run_dirs for row in analysis.log_rows(run_dir, "layers.jsonl")])
     analysis.write_csv(out / "probe.csv", [row for run_dir in run_dirs for row in analysis.log_rows(run_dir, "probe.jsonl")])
     grid.write_bundle(ctx.root, out / "feedback_P1_bundle.zip")
-    say(f"H1a: {data['h1a']['verdict']}; H1: " + ", ".join(f"{beta} {entry['verdict']}" for beta, entry in data["h1"].items())
-        + f"; {len(data['runs'])} of {data['planned_runs']} runs completed" if ctx.quiet else text)
+    if ctx.sections:
+        say(select_sections(text, ctx.sections))
+    else:
+        say(f"H1a: {data['h1a']['verdict']}; H1: " + ", ".join(f"{beta} {entry['verdict']}" for beta, entry in data["h1"].items())
+            + f"; {len(data['runs'])} of {data['planned_runs']} runs completed" if ctx.quiet else text)
     say(f"written: {out / 'feedback_P1.md'}, CSV files and {out / 'feedback_P1_bundle.zip'}")
     return True
 
@@ -723,6 +840,7 @@ def main(argv=None):
     parser.add_argument("--deadline", type=float, default=0.0, help="alternative to --budget-hours: absolute deadline as a Unix timestamp")
     parser.add_argument("--tiny", action="store_true", help="dry run on CPU with synthetic tiny assets")
     parser.add_argument("--quiet", action="store_true", help="feedback stage: print one line instead of the whole report")
+    parser.add_argument("--sections", default="", help="feedback stage: print only these sections of the report, e.g. '2,2c,8'")
     args = parser.parse_args(argv)
     ctx = Context(args)
     names = list(STAGES) if "all" in args.stages else args.stages

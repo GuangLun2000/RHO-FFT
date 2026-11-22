@@ -86,6 +86,25 @@ def test_queue_reuses_finished_runs_without_probing(tmp_path):
     assert [entry["reused"] for entry in record["queue"]] == [True, True] and not any(label.startswith("preflight") for label, _, _ in second.calls)
 
 
+def test_queue_reports_every_ended_run_and_heads_each_new_one(tmp_path):
+    printed, ended = [], []
+    grid.run_queue(make_specs(2), root=tmp_path, tree=".", hardware="gpu-x", revision="abc", common=lambda fields: {"device": "cpu"},
+                   echo=printed.append, run=FakeRunner(), on_finish=lambda spec, entry: ended.append((spec["name"], entry["status"])))
+    assert ended == [("run0", "COMPLETED"), ("run1", "COMPLETED")]
+    assert any(text.startswith("\n#### Run 1 of 2: run0") for text in printed) and any("timing preflight" in text for text in printed)
+    # A summary that fails never stops the queue.
+    record = grid.run_queue(make_specs(2), root=tmp_path / "again", tree=".", hardware="gpu-x", revision="abc", common=lambda fields: {"device": "cpu"},
+                            echo=printed.append, run=FakeRunner(), on_finish=lambda spec, entry: 1 / 0)
+    assert [entry["status"] for entry in record["queue"]] == ["COMPLETED", "COMPLETED"] and any("could not summarise run0" in text for text in printed)
+
+
+def test_report_sections_can_be_printed_alone():
+    text = "# P1 feedback\nintro\n\n## 1. Regression\nI1 ok\n\n## 2. Zeroth-order\ntable\n\n## 2c. E3 pilot\ndrops\n## 8. What next\n- line"
+    assert grid.select_sections(text, ["2c"]) == "## 2c. E3 pilot\ndrops"
+    assert grid.select_sections(text, ["2", "8"]).splitlines() == ["## 2. Zeroth-order", "table", "", "## 8. What next", "- line"]
+    assert grid.select_sections(text, ["9"]) == ""
+
+
 def test_queue_runs_several_jobs_at_a_time_and_budgets_for_the_worst_case(tmp_path):
     runner = FakeRunner(duration=1.5)  # longer than the half-second poll that hands the start lock on
     record = queue(tmp_path, runner, make_specs(2) + [dict(make_specs(4)[3])], jobs=2)
@@ -349,6 +368,15 @@ def test_the_pilot_report_pairs_each_fault_with_its_twin(tmp_path):
     text = p1.pilot_section(pilot)
     assert "B2-lr20" in text and "48 (fault)" in text
     assert p1.fault_pilot(runs[:1]) is None
+
+
+def test_plan_table_and_run_result_say_what_each_run_is():
+    plan = p1.specs(Plan(), blocks=[5, 7])
+    text = p1.plan_table(Plan(), plan)
+    assert text.startswith("Common settings: Qwen2.5-1.5B") and "| qwen-s42-Bu24-b0 |" in text
+    assert "uniform_cut=highest, zo_mode=off" in text and "fault_spec=e3_lr_scale20_preferred_t1.json" in text
+    row = next(line for line in text.splitlines() if line.startswith("| qwen-s42-Au24-b0 |"))
+    assert "Bu24-b0; authors: 63.22" in row
 
 
 def test_session_one_references_were_imported_completely():

@@ -177,3 +177,36 @@ def test_the_estimator_check_finds_the_finite_difference_accurate_in_float32(tin
         assert [entry["q"] for entry in row["information"]] == [1, 2, 4, 8]
     assert (tmp_path / "check" / "zo_check.md").exists()
     json.dumps(result, allow_nan=False)
+
+
+# --- what is printed while a run trains ---------------------------------------------------------------------------------
+
+def test_live_lines_are_readable_and_complete():
+    from ho_fl import live
+    assert live.round_line({"round": 40, "task_loss": 0.41234}, 160, 120.0) == "round 40/160 | train loss 0.4123 | 2.0 min, about 6 min left"
+    line = live.eval_line({"round": 40, "accuracy": 0.8412, "task_loss": 0.4521, "training_task_loss": 0.41, "per_class_accuracy": [0.9, None]}, 160)
+    assert line == "EVAL round 40/160 | test accuracy 84.12% | test loss 0.4521 | train loss 0.4100 | per class 90 / n/a"
+    rows = [{"round": 5, "segment": s, "decomposed": True, "val_loss": 0.5, "pred_total": t, "pred_fo": f, "pred_zo": z}
+            for s, (t, f, z) in enumerate([(0.001, 0.0, 0.001), (0.01, 0.009, 0.001), (0.02, 0.02, 0.0), (0.03, 0.03, 0.0)])]
+    (text,) = live.attribution_lines(rows)
+    assert text.startswith("attribution round 5: eval loss 0.5000, predicted decrease from this round's update +0.061 = first-order +0.059")
+    assert "zeroth-order share +3.3%" in text and "S0 +0.001" in text
+    reference = {"kind": "reference", "round": 3, "pred_fo_report": 0.002, "pred_zo_report": 0.0001}
+    cells = [{"kind": "candidate", "round": 3, "m": m, "rule": rule, "fault": fault, "pred": 0.002 * (m + 1) / 6}
+             for m in range(6) for rule in ("fo_robust", "robust_all", "quorum_robust", "mean_all") for fault in ("none", "flip20")]
+    lines = live.dose_lines([reference, *cells])
+    assert lines[0] == "dose round 3: one zeroth-order report moves S1 +0.05x as far as a first-order report"
+    assert lines[1].startswith("  flip20, progress for m = 0..5 | fo_robust") and lines[1].endswith("+0.17  +0.33  +0.50  +0.67  +0.83  +1.00")
+    assert live.dose_lines([{**reference, "pred_fo_report": -0.001}])[0].startswith("dose round 3: the first-order reports did not lower")
+
+
+def test_launch_prints_evaluations_and_one_line_per_probe_round(tiny_config):
+    printed = []
+    cfg = tiny_config("sst2", rounds=2, evaluate_every=1, k=3, E=1, attribution_every=1, probe_val_examples=32)
+    record = harness.run_training({key: getattr(cfg, key) for key in ("model", "dataset", "rounds", "evaluate_every", "k", "E",
+                                                                       "attribution_every", "probe_val_examples", "model_path", "token_cache", "device")},
+                                  Path(cfg.output).parent / "launched", echo=printed.append, label="tiny")
+    assert record["status"] == "COMPLETED"
+    text = "\n".join(printed)
+    assert "[tiny] EVAL round 0/2 | test accuracy" in text and "[tiny] EVAL round 2/2" in text
+    assert text.count("[tiny] attribution round") == 2 and "starting (full output in launched.log)" in text

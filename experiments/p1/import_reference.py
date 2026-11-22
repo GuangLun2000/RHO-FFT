@@ -12,17 +12,24 @@ import re
 import sys
 from pathlib import Path
 
-EVALUATION = re.compile(r"\[(?P<model>[a-z0-9]+)-s(?P<seed>\d+)-(?P<arm>[\w.\-]+)\] eval @ round (?P<round>\d+): accuracy=(?P<accuracy>[\d.]+) task_loss=(?P<loss>[\d.]+)")
+RUN = r"\[(?P<model>[a-z0-9]+)-s(?P<seed>\d+)-(?P<arm>[\w.\-]+)\] "
+# Session 1 printed "eval @ round 40: accuracy=0.8412 task_loss=0.4521"; later sessions print
+# "EVAL round 40/160 | test accuracy 84.12% | test loss 0.4521 | ...".
+EVALUATIONS = (
+    (re.compile(RUN + r"eval @ round (?P<round>\d+): accuracy=(?P<accuracy>[\d.]+) task_loss=(?P<loss>[\d.]+)"), 100.0),
+    (re.compile(RUN + r"EVAL round (?P<round>\d+)(?:/\d+)? \| test accuracy (?P<accuracy>[\d.]+)% \| test loss (?P<loss>[\d.]+)"), 1.0),
+)
 
 
 def parse(text, model):
     runs = {}
-    for match in EVALUATION.finditer(text):
-        if match["model"] != model:
-            continue
-        run = runs.setdefault(match["arm"], {"seed": int(match["seed"]), "curve": {}})
-        run["curve"][int(match["round"])] = {"round": int(match["round"]), "accuracy_pct": round(100 * float(match["accuracy"]), 2),
-                                             "eval_loss": float(match["loss"])}
+    for pattern, scale in EVALUATIONS:
+        for match in pattern.finditer(text):
+            if match["model"] != model:
+                continue
+            run = runs.setdefault(match["arm"], {"seed": int(match["seed"]), "curve": {}})
+            run["curve"][int(match["round"])] = {"round": int(match["round"]), "accuracy_pct": round(scale * float(match["accuracy"]), 2),
+                                                 "eval_loss": float(match["loss"])}
     for run in runs.values():
         run["curve"] = [run["curve"][key] for key in sorted(run["curve"])]
         run["final_round"] = run["curve"][-1]["round"]
@@ -33,7 +40,7 @@ def parse(text, model):
 def main(source, model, revision, hardware, output):
     runs = parse(Path(source).read_text(), model)
     record = {"source": source, "model": model, "revision": revision, "hardware": hardware,
-              "note": "evaluation lines printed during the session (accuracy to 4 decimals of a fraction, loss to 4 decimals)", "runs": runs}
+              "note": "evaluation lines printed during the session (accuracy to 2 decimals of a percent, loss to 4 decimals)", "runs": runs}
     Path(output).write_text(json.dumps(record, indent=1) + "\n")
     print(f"{len(runs)} runs: {sorted(runs)}")
 

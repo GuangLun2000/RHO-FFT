@@ -231,28 +231,37 @@ def tree_environment(tree):
     return env
 
 
-def _describe(row):
-    parts = [f"{key}={row[key]:.4f}" for key in ("accuracy", "exact_match", "f1", "task_loss") if _number(row.get(key))]
-    return " ".join(parts)
-
-
-def launch(command, output, log_path, cwd=None, env=None, label="", progress_every=10, poll=0.2, echo=print, stop_at=None):
+def launch(command, output, log_path, cwd=None, env=None, label="", progress_every=10, poll=0.2, echo=print, stop_at=None,
+           total_rounds=None, evaluate_every=None):
     """Run ``command`` and follow ``<output>/rounds.jsonl`` and ``curves.jsonl`` while it runs.
 
     Standard output and error of the command go to ``log_path``. Returns the exit code, the wall time and the
     times (seconds since launch) at which each round and each evaluation appeared in the logs. ``stop_at`` is an
     optional ``time.time()`` value after which the command is terminated (``timed_out`` is then true).
+
+    Printed while it runs (``ho_fl.live``): every evaluation with the training loss, a training line every
+    ``progress_every`` rounds that has no evaluation, and a summary of each measured round of the probe logs.
     """
+    from .live import FOLLOWED, eval_line, round_line
+
     output, log_path = Path(output), Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     round_times, eval_times = {}, {}
-    offsets = {"rounds.jsonl": 0, "curves.jsonl": 0}
+    offsets = {"rounds.jsonl": 0, "curves.jsonl": 0, **{name: 0 for name in FOLLOWED}}
+    pending = {name: [] for name in FOLLOWED}   # rows of the probe round being written
     last_echo = [started]
 
-    def drain():
+    def flush(name):
+        if pending[name]:
+            for text in FOLLOWED[name](pending[name]):
+                echo(f"    [{label}] {text}")
+            pending[name] = []
+
+    def drain(final=False):
         now = time.monotonic()
         elapsed = now - started
+        fresh = []
         for name in offsets:
             path = output / name
             if not path.exists():
@@ -264,18 +273,36 @@ def launch(command, output, log_path, cwd=None, env=None, label="", progress_eve
             offsets[name] += complete
             for line in data[:complete].splitlines():
                 try:
-                    row = json.loads(line)
+                    fresh.append((name, json.loads(line)))
                 except json.JSONDecodeError:
                     continue
-                if name == "rounds.jsonl":
-                    round_times[str(row["round"])] = elapsed
-                    if row["round"] == 1 or row["round"] % progress_every == 0 or now - last_echo[0] > 120:
-                        last_echo[0] = now
-                        echo(f"    [{label}] round {row['round']} train_loss={row['task_loss']:.4f} t={elapsed:.0f}s")
-                else:
-                    eval_times[str(row["round"])] = elapsed
+        # In the order they happened: within a round, training before its evaluation; probe logs after both.
+        rank = {"rounds.jsonl": 0, "curves.jsonl": 1}
+        fresh.sort(key=lambda item: (item[0] not in rank, item[1].get("round", 0) if item[0] in rank else 0, rank.get(item[0], 2)))
+        for name, row in fresh:
+            if name == "rounds.jsonl":
+                round_times[str(row["round"])] = elapsed
+                r = row["round"]
+                evaluated = evaluate_every and (r % evaluate_every == 0 or r == total_rounds)
+                if r == 1 or (r % progress_every == 0 and not evaluated) or now - last_echo[0] > 120:
                     last_echo[0] = now
-                    echo(f"    [{label}] eval @ round {row['round']}: {_describe(row)} t={elapsed:.0f}s")
+                    echo(f"    [{label}] {round_line(row, total_rounds, elapsed)}")
+            elif name == "curves.jsonl":
+                if "round" not in row or str(row["round"]) in eval_times:
+                    continue
+                eval_times[str(row["round"])] = elapsed
+                last_echo[0] = now
+                echo(f"    [{label}] {eval_line(row, total_rounds)}")
+            elif row.get("scope") == "error":
+                echo(f"    [{label}] probe failed in round {row.get('round')}: {row.get('error')}")
+            else:
+                # A probe round is complete once a row of a later round appears (or the run has ended).
+                if pending[name] and pending[name][-1].get("round") != row.get("round"):
+                    flush(name)
+                pending[name].append(row)
+        if final:
+            for name in pending:
+                flush(name)
 
     def terminate(process):
         process.terminate()
@@ -298,7 +325,7 @@ def launch(command, output, log_path, cwd=None, env=None, label="", progress_eve
         except BaseException:
             terminate(process)
             raise
-        drain()
+        drain(final=True)
     return {"returncode": process.returncode, "wall_s": time.monotonic() - started, "round_times": round_times,
             "eval_times": eval_times, "timed_out": timed_out}
 
@@ -374,10 +401,13 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
         if mirror is not None:
             mirror_run(stale, Path(mirror).with_name(stale.name), echo)
     command = [python or sys.executable, "-m", module, *cli({**fields, "output": str(output)})]
-    echo(f"  [{label}] starting: {' '.join(command[2:])}")
+    # The full command is in run_meta.json and the configuration in config.json; the output names the log only.
+    echo(f"  [{label}] starting (full output in {log_path.name})")
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    evaluate_every = fields.get("evaluate_every") or max(1, 50 // int(fields.get("E", 5)))
     progress = launch(command, output, log_path, cwd=str(Path(tree).resolve()), env=tree_environment(tree),
-                      label=label, progress_every=progress_every, echo=echo, stop_at=stop_at)
+                      label=label, progress_every=progress_every, echo=echo, stop_at=stop_at,
+                      total_rounds=fields.get("rounds"), evaluate_every=evaluate_every)
     status = run_status(output, module)
     if status not in FINISHED:
         status = "TIMEOUT" if progress["timed_out"] else "FAILED"
@@ -395,7 +425,7 @@ def run_training(fields, output, tree=".", module="ho_fl.train", label=None, rev
     if mirror is not None:
         mirror_run(output, mirror, echo)
     if status in FINISHED:
-        echo(f"  [{label}] {status.lower()} in {progress['wall_s']:.0f}s")
+        echo(f"  [{label}] {status.lower()} in {progress['wall_s'] / 60:.1f} min")
     else:
         echo(f"  [{label}] {status} (exit code {progress['returncode']}); end of {log_path}:")
         echo("\n".join("      " + line for line in meta["log_tail"].splitlines()[-25:]))

@@ -21,7 +21,6 @@ Reported per state, precision of the backbone (bfloat16 as in training, float32 
                              [--batches 2] [--precisions bfloat16,float32] [ho-fl-train options, e.g. --model qwen ...]
 """
 import argparse
-import json
 import math
 import sys
 from pathlib import Path
@@ -139,12 +138,17 @@ def run(cfg, out, states=("",), q=64, mus=(1e-4, 1e-3, 1e-2), batches=2, precisi
             for cut, cid in clients.items():
                 for row in client_check(b, state, cid, cut, q, mus, batches):
                     rows.append({"state": label, "precision": precision, **row})
-                    print(json.dumps({"event": "ZO_CHECK", "state": label, "precision": precision, "cut": cut, "mu": row["mu"],
-                                      "correlation": row["correlation"], "slope": row["slope"]}), flush=True)
+                    show = lambda value, digits: "n/a" if value is None else f"{value:.{digits}f}"  # noqa: E731
+                    print(f"    estimator check | state {label} | backbone {precision} | mu {row['mu']:g} | cut {cut} (client {cid}): "
+                          f"correlation with the exact derivative {show(row['correlation'], 4)}, slope {show(row['slope'], 3)}, "
+                          f"same sign {show(row['sign_agreement'], 3)}", flush=True)
     result = {"model": cfg.model, "dataset": cfg.dataset, "seed": cfg.seed, "q": q, "batches": batches, "mus": list(mus),
               "torch_version": torch.__version__, "device": cfg.device, "rows": rows}
     write_json(out / "zo_check.json", result)
     (out / "zo_check.md").write_text(render(result))
+    print("\nEstimator check (correlation and slope 1 mean HO-FL's finite difference equals the exact directional derivative; "
+          "the last column compares the q = 2 estimate's cosine with the gradient: HO-FL / from exact derivatives / theory):\n", flush=True)
+    print(render(result), flush=True)
     return result
 
 

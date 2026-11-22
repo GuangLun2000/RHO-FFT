@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 from ho_fl import analysis, dose, grid, harness  # noqa: E402
-from ho_fl.grid import fmt, say, table  # noqa: E402
+from ho_fl.grid import fmt, say, select_sections, table  # noqa: E402
 
 BASE = {"dataset": "ag_news", "partition": "dirichlet_05"}
 BASE_ROUNDS, DOSE_ROUNDS = 40, 20
@@ -41,6 +41,7 @@ class Context:
         self.jobs = max(1, args.jobs)
         self.deadline = args.deadline or (time.time() + 3600 * args.budget_hours if args.budget_hours else None)
         self.quiet = args.quiet
+        self.sections = [part.strip() for part in args.sections.split(",") if part.strip()]
         self.base_rounds, self.dose_rounds = (4, 3) if args.tiny else (BASE_ROUNDS, DOSE_ROUNDS)
         self.doses = [int(part) for part in (args.doses or ("2,1" if args.tiny else ",".join(str(m) for m in dose.M_ORDER))).split(",")]
         self.faults = [part for part in (args.faults or ("none,flip20" if args.tiny else ",".join(dose.FAULTS))).split(",")]
@@ -80,11 +81,11 @@ class Context:
 
 def queue(ctx, plan, label):
     from ho_fl.config import Config
-    say(f"== {label} ({ctx.model}, seed {ctx.seed}, {len(plan)} runs, up to {ctx.jobs} at a time, {ctx.hardware}) ==")
+    say(f"\n### {label[0].upper() + label[1:]}: {len(plan)} run(s), {ctx.jobs} at a time, on {ctx.hardware}\n")
     for spec in plan:  # every configuration is validated before anything is launched
         Config(**{**spec["fields"], **ctx.common(spec["fields"])}).resolve()
     record = grid.run_queue(plan, root=ctx.root, tree=REPO, hardware=ctx.hardware, revision=ctx.head, common=ctx.common,
-                            deadline=ctx.deadline, jobs=ctx.jobs)
+                            deadline=ctx.deadline, jobs=ctx.jobs, on_finish=lambda spec, entry: say(run_result(ctx, spec, entry)))
     history = harness.read_json(ctx.root / "queue_all.json", {"entries": []})
     fresh = {entry["name"]: entry for entry in record["queue"]}
     history["entries"] = [fresh.pop(entry["name"], entry) for entry in history["entries"]] + list(fresh.values())
@@ -97,7 +98,20 @@ def queue(ctx, plan, label):
     return all(entry["status"] in harness.FINISHED for entry in record["queue"])
 
 
+def run_result(ctx, spec, entry):
+    """Printed right after a run ends: how it ended and its last evaluation (the probe rounds were printed while it ran)."""
+    head = f"\n**Result of {spec['name']}**: {entry.get('status')}" + (" (reused)" if entry.get("reused") else "") \
+        + (f", {entry['wall_s'] / 60:.1f} min" if entry.get("wall_s") and not entry.get("reused") else "")
+    curve = analysis.curve_rows(ctx.root / "runs" / spec["name"]) if entry.get("status") in harness.FINISHED else []
+    if curve:
+        head += f"; test accuracy {curve[-1]['accuracy_pct']:.2f}% at round {curve[-1]['round']} (test loss {curve[-1]['eval_loss']:.4f})"
+    return head
+
+
 def stage_base(ctx):
+    say(f"E2 starting point: HO-FL with its default settings (biased sampling, beta = 0.75) for {ctx.base_rounds} rounds. Its state after "
+        f"round {ctx.base_rounds} is where the counterfactual trajectory starts, and the second state of the estimator check; "
+        "it also fixes the tiers and the unreliable device.")
     return queue(ctx, [ctx.base_spec()], "base run") and harness.run_status(ctx.base_dir) == "COMPLETED"
 
 
@@ -115,8 +129,14 @@ def stage_cf(ctx):
     if spec is None:
         say("The base run is not complete; run the base stage first.")
         return False
-    say(f"unreliable device: client {inputs['device']}; trajectory on the cohorts of dose m={ctx.m_traj}; {ctx.dose_rounds} rounds; "
-        f"every round all doses x {len(dose.COUNTERFACTUAL_RULES)} rules x {len(dose.COUNTERFACTUAL_FAULTS)} fault strengths")
+    say(f"E2 counterfactual trajectory: {ctx.dose_rounds} rounds from the round-{ctx.base_rounds} state. Every round the cohort is the unreliable "
+        f"T1 device (client {inputs['device']}, always first-order on the scarce segment S1) plus 5 others laid out as dose m = {ctx.m_traj}; "
+        "the 5 others also retrain at the other cut on the same batches, so the probe can form every dose m = 0..5 (m = honest first-order "
+        f"reports on S1 besides the device) and aggregate each under {len(dose.COUNTERFACTUAL_RULES)} rules ({', '.join(dose.COUNTERFACTUAL_RULES)}) "
+        f"and {len(dose.COUNTERFACTUAL_FAULTS)} fault strengths of the device's S1 report ({', '.join(dose.COUNTERFACTUAL_FAULTS)}: none, sign flipped, "
+        "sign flipped and scaled x20). Printed per round: progress on S1 in units of one honest first-order report under the x20 fault; "
+        "fo_robust above robust_all for m >= 2 and below it for m <= 1 is what H2 predicts. The training itself follows the m = 2 cohorts "
+        "under mean_all and is not changed by the probe.")
     return queue(ctx, [spec], "counterfactual dose-response")
 
 
@@ -317,10 +337,13 @@ def stage_feedback(ctx):
     (out / "feedback_P2.md").write_text(text)
     analysis.write_csv(out / "dose.csv", data["arms"])
     grid.write_bundle(ctx.root, out / "feedback_P2_bundle.zip")
-    say("H2 (counterfactual): " + (", ".join(f"{fault} {entry['verdict']}" for fault, entry in data["cf"]["h2"].items()) if data["cf"] else "not run")
-        + "; H2 (full arms): " + (", ".join(f"{fault} {entry['verdict']}" for fault, entry in data["h2"].items()) or "not run")
-        + f"; {data['finished_runs']} of {data['planned_runs']} full arms finished"
-        if ctx.quiet else text)
+    if ctx.sections:
+        say(select_sections(text, ctx.sections))
+    else:
+        say("H2 (counterfactual): " + (", ".join(f"{fault} {entry['verdict']}" for fault, entry in data["cf"]["h2"].items()) if data["cf"] else "not run")
+            + "; H2 (full arms): " + (", ".join(f"{fault} {entry['verdict']}" for fault, entry in data["h2"].items()) or "not run")
+            + f"; {data['finished_runs']} of {data['planned_runs']} full arms finished"
+            if ctx.quiet else text)
     say(f"written: {out / 'feedback_P2.md'}, dose.csv and {out / 'feedback_P2_bundle.zip'}")
     return True
 
@@ -345,6 +368,7 @@ def main(argv=None):
     parser.add_argument("--deadline", type=float, default=0.0, help="alternative to --budget-hours: absolute deadline as a Unix timestamp")
     parser.add_argument("--tiny", action="store_true", help="dry run on CPU with synthetic tiny assets")
     parser.add_argument("--quiet", action="store_true", help="feedback stage: print one line instead of the whole report")
+    parser.add_argument("--sections", default="", help="feedback stage: print only these sections of the report, e.g. '3,7'")
     args = parser.parse_args(argv)
     ctx = Context(args)
     results = {}
