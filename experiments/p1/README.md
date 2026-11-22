@@ -1,6 +1,6 @@
 # P1: measurement (E1a, E1b, E1c)
 
-`p1.py` runs the experiments of milestone P1 and writes a feedback report; `notebooks/P1_colab.ipynb` drives it on
+`p1.py` runs the experiments of milestone P1 and writes a feedback report; `notebooks/backup/P1_colab.ipynb` (an earlier session; the current notebook is `notebooks/RHO-FFT_colab.ipynb`) drives it on
 Colab together with the baseline regression of `experiments/p0/p0.py`.
 
 ```bash

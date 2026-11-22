@@ -1,6 +1,6 @@
 # P0: golden values, regression and the E0 reproduction
 
-`p0.py` runs the GPU steps of milestone P0 and writes a feedback report. `notebooks/P0_colab.ipynb` drives it on
+`p0.py` runs the GPU steps of milestone P0 and writes a feedback report. `notebooks/backup/P0_colab.ipynb` (an earlier session; the current notebook is `notebooks/RHO-FFT_colab.ipynb`) drives it on
 Colab; the same commands work on any machine with a CUDA GPU.
 
 ```bash

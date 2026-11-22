@@ -11,6 +11,7 @@ scheduling, aggregation and uplink mechanisms that follow from that.
   settings is meant to reproduce the upstream results.
 - **Status.** Work in progress. Upstream ships no LICENSE file, so this repository stays private until the licensing is
   clarified.
+- **Colab.** The one notebook to run is `notebooks/RHO-FFT_colab.ipynb` ([open in Colab](https://colab.research.google.com/github/GuangLun2000/RHO-FFT/blob/main/notebooks/RHO-FFT_colab.ipynb)); it clones this repository anonymously. `notebooks/backup/` keeps the notebooks of earlier sessions for the record.
 
 The remainder of this file is the upstream README.
 
