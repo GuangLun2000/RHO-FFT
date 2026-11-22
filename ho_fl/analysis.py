@@ -269,6 +269,30 @@ def sampling_speedup(curves, round_id):
             "gain_zo_off": _mean([row["gain_zo_off"] for row in rows]), "max_gap_on_off": _mean([row["max_gap_on_off"] for row in rows])}
 
 
+def resilience_metrics(faulty, clean, window, tolerance=0.5):
+    """Resilience of a run with a fault against the same configuration and seed without it (brief section 6.11).
+
+    ``faulty`` and ``clean`` are curve rows (``round``, ``accuracy_pct``); only rounds evaluated in both count. The drop
+    at a round is the clean accuracy minus the faulty one, in percentage points. Returns the mean drop over the
+    evaluations inside the fault window, the largest drop from the start of the window on, the rounds after the window
+    until the drop is at most ``tolerance`` at two consecutive evaluations (``None`` and censored when that never
+    happens, also when the faulty run stopped early) and the gap at the last common evaluation. ``None`` when no common
+    evaluation falls inside the window.
+    """
+    clean_at = {int(row["round"]): row["accuracy_pct"] for row in clean}
+    drops = sorted((int(row["round"]), clean_at[int(row["round"])] - row["accuracy_pct"]) for row in faulty if int(row["round"]) in clean_at)
+    first, last = window
+    inside = [drop for r, drop in drops if first <= r <= last]
+    if not inside:
+        return None
+    worst_round, worst = max(((r, drop) for r, drop in drops if r >= first), key=lambda item: item[1])
+    after = [(r, drop) for r, drop in drops if r >= last]
+    recovery = next((r - last for (r, drop), (_, following) in zip(after, after[1:]) if drop <= tolerance and following <= tolerance), None)
+    return {"window": [first, last], "evaluations_in_window": len(inside), "mean_drop": sum(inside) / len(inside), "max_drop": worst,
+            "max_drop_round": worst_round, "recovery_rounds": recovery, "recovery_censored": recovery is None, "tolerance": tolerance,
+            "final_round": drops[-1][0], "final_gap": drops[-1][1], "drops": [[r, drop] for r, drop in drops]}
+
+
 def attribution_summary(rows, every=1):
     """First-order decrease of the evaluation loss attributed to first-order and zeroth-order components, per segment.
 

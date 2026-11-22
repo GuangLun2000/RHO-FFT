@@ -174,10 +174,11 @@ class Plan:
 
 def test_p1_arms_resolve_to_the_configurations_of_the_brief():
     specs = p1.specs(Plan())
-    # The ladder for both seeds (2 x 12), then the arms of blocks 5, 6 and 4 for the first seed only.
-    assert len(specs) == 33 and [s["arm"] for s in specs[:5]] == ["A-b0", "C-b0", "A-b0.75", "Ax2-b0", "Ax3-b0"] and specs[12]["seed"] == 43
-    assert len({s["name"] for s in specs}) == 33 and specs[0]["name"] == "qwen-s42-A-b0"
-    assert [s["arm"] for s in specs[24:]] == ["A-b0.75-attr", "Au24-b0", "Bu24-b0", "A-b0.75-squad", "B-b0.75-squad", "Cx2-b0", "fedavg-x2", "C-b0-r480", "A-b0-r480"]
+    # The ladder for both seeds (2 x 12), then the arms of blocks 5, 6, 7 and 4 for the first seed only.
+    assert len(specs) == 35 and [s["arm"] for s in specs[:5]] == ["A-b0", "C-b0", "A-b0.75", "Ax2-b0", "Ax3-b0"] and specs[12]["seed"] == 43
+    assert len({s["name"] for s in specs}) == 35 and specs[0]["name"] == "qwen-s42-A-b0"
+    assert [s["arm"] for s in specs[24:]] == ["A-b0.75-attr", "Au24-b0", "Bu24-b0", "A-b0.75-squad", "B-b0.75-squad", "B2-lr20", "B2-label",
+                                             "Cx2-b0", "fedavg-x2", "C-b0-r480", "A-b0-r480"]
     resolved = {s["arm"]: Config(**s["fields"]).resolve() for s in specs[:12]}
     names = {arm: (cfg.aggregation_name, cfg.zo_mode, cfg.server_lr, cfg.beta) for arm, cfg in resolved.items()}
     assert names["A-b0"] == ("mean_all", "on", 1.0, 0.0) and names["A-b0.75"] == ("mean_all", "on", 1.0, 0.75)
@@ -247,10 +248,11 @@ def test_zeroth_order_checks_reproduce_the_authors_settings():
     checks = {s["arm"]: s for s in p1.specs(Plan(), blocks=[5, 6])}
     assert list(checks) == ["A-b0.75-attr", "Au24-b0", "Bu24-b0", "A-b0.75-squad", "B-b0.75-squad"] and {s["seed"] for s in checks.values()} == {42}
     resolved = {arm: Config(**spec["fields"]).resolve() for arm, spec in checks.items()}
-    # A-b0.75-attr is configured exactly like A-b0.75 of session 1, read-only probes included, plus the (read-only)
-    # attribution probe, so the two trainings must be identical.
+    # A-b0.75-attr is configured exactly like A-b0.75 of session 1, read-only probes included; it only adds read-only
+    # things (the attribution probe, evaluations every 4 rounds with per-class accuracy), so the two trainings must be identical.
     ladder = {s["arm"]: s for s in p1.specs(Plan(), blocks=[1]) if s["seed"] == 42}
-    assert {key: value for key, value in checks["A-b0.75-attr"]["fields"].items() if key != "attribution_every"} == ladder["A-b0.75"]["fields"]
+    read_only = ("attribution_every", "evaluate_every", "per_class_eval")
+    assert {key: value for key, value in checks["A-b0.75-attr"]["fields"].items() if key not in read_only} == ladder["A-b0.75"]["fields"]
     assert resolved["A-b0.75-attr"].attribution_every == 4 and resolved["A-b0.75-attr"].aggregation_name == "mean_all"
     # The paper's uniform highest boundary (24 for Qwen), with and without zeroth-order updates.
     assert (resolved["Au24-b0"].uniform_cut, resolved["Au24-b0"].beta, resolved["Au24-b0"].zo_mode, resolved["Au24-b0"].aggregation_name) == (24, 0.0, "on", "mean_all")
@@ -289,6 +291,64 @@ def test_author_statements_and_the_cross_session_check():
     current["curve"][1]["accuracy_pct"] = 61.3
     assert p1.canary([current], Ctx())["differing_rounds"] == [10]
     assert p1.canary([], Ctx()) is None
+
+
+def test_the_e3_pilot_runs_two_cells_of_the_brief_against_their_fault_free_twin():
+    from ho_fl.faults import Faults
+    pilot = {s["arm"]: s for s in p1.specs(Plan(), blocks=[5, 7])}
+    assert list(pilot) == ["A-b0.75-attr", "Au24-b0", "Bu24-b0", "B2-lr20", "B2-label"] and {s["seed"] for s in pilot.values()} == {42}
+    twin = Config(**pilot["A-b0.75-attr"]["fields"]).resolve()
+    kinds = {}
+    for arm in ("B2-lr20", "B2-label"):
+        fields = pilot[arm]["fields"]
+        cfg = Config(**fields).resolve()
+        # Brief section 7, E3: HO-FL's default (B2), 160 rounds, evaluated every 4 rounds with per-class accuracy.
+        assert (cfg.aggregation_name, cfg.beta, cfg.sampler, cfg.rounds, cfg.evaluate_every, cfg.per_class_eval, cfg.on_nonfinite) == \
+            ("mean_all", 0.75, "dep_round_v1", 160, 4, True, "stop")
+        assert {key: value for key, value in fields.items() if key not in ("fault_spec", "on_nonfinite")} == \
+            {key: value for key, value in pilot["A-b0.75-attr"]["fields"].items() if key not in ("layer_stats", "probe_rounds", "attribution_every")}
+        spec = json.loads(Path(fields["fault_spec"]).read_text())["faults"]
+        assert Path(fields["fault_spec"]).is_absolute() and len(spec) == 1 and tuple(spec[0]["rounds"]) == p1.PILOT_WINDOW
+        assert spec[0]["select"] == {"role": "preferred_t1", "count": 1}
+        kinds[arm] = (spec[0]["kind"], spec[0]["params"])
+        # The device is resolved like in training: the best-ranked T1 device of the preferred set.
+        faults = Faults(cfg, [8] * 10 + [16] * 10 + [24] * 10)
+        assert len(faults.entries) == 1 and len(faults.entries[0]["clients"]) == 1 and faults.entries[0]["clients"][0] < 10
+    assert kinds == {"B2-lr20": ("lr_scale", {"scale": 20}), "B2-label": ("label_noise", {"rate": 1.0, "map": "shift"})}
+    assert (twin.evaluate_every, twin.per_class_eval) == (4, True)
+
+
+def test_resilience_metrics_of_the_brief():
+    clean = curve(*[(r, 80.0 + r / 20) for r in range(0, 161, 4)])
+    drop = {44: 1.0, 48: 3.0, 52: 2.0, 56: 2.0, 60: 2.0, 64: 2.0, 68: 2.0, 72: 2.0, 76: 2.0, 80: 2.0, 84: 1.0, 88: 0.6, 92: 0.4, 96: 0.7, 100: 0.3, 104: 0.2}
+    faulty = curve(*[(r, 80.0 + r / 20 - drop.get(r, 0.1 if r > 104 else 0.0)) for r in range(0, 161, 4)])
+    metrics = analysis.resilience_metrics(faulty, clean, (41, 80))
+    assert metrics["evaluations_in_window"] == 10 and metrics["mean_drop"] == pytest.approx(2.0)
+    assert (metrics["max_drop"], metrics["max_drop_round"]) == (pytest.approx(3.0), 48)
+    # Within 0.5 at 92 but not at 96; within 0.5 at 100 and 104: recovered 20 rounds after the window.
+    assert metrics["recovery_rounds"] == 20 and not metrics["recovery_censored"]
+    assert metrics["final_round"] == 160 and metrics["final_gap"] == pytest.approx(0.1)
+    stopped = [row for row in faulty if row["round"] <= 88]          # a run that stopped (diverged) at round 88
+    assert analysis.resilience_metrics(stopped, clean, (41, 80))["recovery_censored"] is True
+    sparse = curve(*[(r, 80.0) for r in range(0, 161, 10)])          # only every 20th round in common with the pilot
+    assert analysis.resilience_metrics(faulty, sparse, (41, 80))["evaluations_in_window"] == 2
+    assert analysis.resilience_metrics(curve((0, 50.0), (3, 51.0)), curve((0, 50.0), (3, 51.0)), (41, 80)) is None
+
+
+def test_the_pilot_report_pairs_each_fault_with_its_twin(tmp_path):
+    clean = curve(*[(r, 80.0) for r in range(0, 161, 4)])
+    faulty = curve(*[(r, 80.0 - (2.0 if 41 <= r <= 80 else 0.0)) for r in range(0, 161, 4)])
+    (tmp_path / "summary.json").write_text('{"status": "COMPLETED"}')
+    runs = [{"summary": {"arm": "A-b0.75-attr", "seed": 42, "block": 5}, "dir": "x", "curve": clean},
+            {"summary": {"arm": "B2-lr20", "seed": 42, "block": 7, "what": "lr x20", "status": "COMPLETED"}, "dir": str(tmp_path), "curve": faulty}]
+    pilot = p1.fault_pilot(runs)
+    entry = pilot["arms"][0]
+    assert pilot["twin"] == "A-b0.75-attr" and pilot["twin_source"] == "this session" and entry["max_gap_before_window"] == 0
+    assert entry["metrics"]["mean_drop"] == pytest.approx(2.0) and entry["metrics"]["recovery_rounds"] == 4   # within 0.5 at 84 and 88
+    assert [point["round"] for point in pilot["curve"]][:3] == [32, 40, 48] and pilot["curve"][2]["B2-lr20"] == pytest.approx(2.0)
+    text = p1.pilot_section(pilot)
+    assert "B2-lr20" in text and "48 (fault)" in text
+    assert p1.fault_pilot(runs[:1]) is None
 
 
 def test_session_one_references_were_imported_completely():

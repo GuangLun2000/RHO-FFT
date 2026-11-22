@@ -1,0 +1,1 @@
+{"faults": [{"select": {"role": "preferred_t1", "count": 1}, "rounds": [41, 80], "kind": "label_noise", "params": {"rate": 1.0, "map": "shift"}}]}

@@ -14,7 +14,8 @@ trained again (runs are deterministic on a given GPU and library version). Block
 session 1 (larger server step, longer training). Blocks 5 and 6 check the HO-FL authors' statements on the
 zeroth-order updates under the authors' settings (AG News, uniform highest boundary; SQuAD, Top-FO-Only); the
 numerical check of the zeroth-order estimator (`python -m ho_fl.zo_check`) writes into <root>/zo_check/ and is
-reported here too. `--tiny` replaces model and data by the synthetic tiny assets and runs on CPU (SQuAD arms are
+reported here too. Block 7 is a pilot of E3: one faulty device under HO-FL's default, against its fault-free twin
+A-b0.75-attr, with the resilience metrics of brief section 6.11. `--tiny` replaces model and data by the synthetic tiny assets and runs on CPU (SQuAD arms are
 left out): a plumbing check whose numbers mean nothing.
 
 The baseline regression (invariants I1 and I2) is not repeated here: run `experiments/p0/p0.py env golden regress`
@@ -59,6 +60,10 @@ AUTHOR_STATEMENTS = [
 REPRODUCED_SHARE = 0.5
 # A drop of at least this many points when the zeroth-order updates are switched off counts as a contribution.
 CONTRIBUTION_POINTS = 1.0
+# Fault window of the E3 pilot (block 7; the rounds of experiments/faults/e3_*.json). A pilot fault whose largest drop
+# stays below PILOT_VISIBLE points cannot separate configurations in E3 (the paper's seed sd of HO-FL is 0.56).
+PILOT_WINDOW = (41, 80)
+PILOT_VISIBLE = 1.0
 # Accuracy levels (%) used to express how fast an arm learns ("rounds to reach").
 TARGETS = {"qwen": (80.0, 85.0, 87.0), "opt": (40.0, 50.0, 60.0)}
 
@@ -120,6 +125,8 @@ def specs(ctx, blocks=None):
                 if fields.get("uniform_cut") == "highest":
                     from ho_fl.config import SPECS
                     fields["uniform_cut"] = max(SPECS[ctx.model][3])
+                if fields.get("fault_spec"):
+                    fields["fault_spec"] = str(REPO / fields["fault_spec"])  # relative to the repository root
                 if arm.get("probes"):
                     probe_rounds = [r for r in (int(part) for part in ARMS["probe_rounds"].split(",")) if r <= rounds]
                     fields["probe_rounds"] = ",".join(str(r) for r in sorted(set(probe_rounds) | {rounds}))
@@ -176,7 +183,9 @@ def collect(ctx):
     runs, accuracy, curves = [], {}, {}
     for spec in plan:
         run_dir = ctx.root / "runs" / spec["name"]
-        if harness.run_status(run_dir) != "COMPLETED":
+        status = harness.run_status(run_dir)
+        # A run with a fault that diverged is a result too (it keeps its last finite evaluation).
+        if status != "COMPLETED" and not (status == "DIVERGED" and spec["fields"].get("fault_spec")):
             continue
         row = analysis.summary_row(run_dir)
         row.update(arm=spec["arm"], block=spec["block"], what=arms[spec["arm"]]["what"])
@@ -218,7 +227,32 @@ def collect(ctx):
             "planned_runs": len(plan), "planned_seeds": planned,
             "regression": grid.regression_verdict(ctx.root.parent, ctx.head, ctx.hardware),
             "zo_check": harness.read_json(ctx.root / "zo_check" / "zo_check.json"),
-            "canary": canary(runs, ctx), "statements": statements(runs)}
+            "canary": canary(runs, ctx), "statements": statements(runs), "pilot": fault_pilot(runs)}
+
+
+def fault_pilot(runs):
+    """E3 pilot (block 7): every faulty run against the same training without the fault, with the metrics of brief
+    section 6.11. The twin is A-b0.75-attr of this session (evaluated every 4 rounds like the pilot), else A-b0.75 of
+    session 1 (every 10 rounds, so only every 20th round is common)."""
+    by_arm = {run["summary"]["arm"]: run for run in runs}
+    twin = by_arm.get("A-b0.75-attr") or by_arm.get("A-b0.75")
+    pilots = [run for run in runs if run["summary"].get("block") == 7 and run["dir"]]
+    if twin is None or not pilots:
+        return None
+    clean_at = {int(point["round"]): point["accuracy_pct"] for point in twin["curve"]}
+    entries, drops = [], {}
+    for run in pilots:
+        metrics = analysis.resilience_metrics(run["curve"], twin["curve"], PILOT_WINDOW)
+        summary = harness.read_json(Path(run["dir"]) / "summary.json", {})
+        drops[run["summary"]["arm"]] = dict((r, drop) for r, drop in (metrics or {}).get("drops", []))
+        # Before the window both runs train identically, so these drops must be exactly zero.
+        before = [abs(drop) for r, drop in drops[run["summary"]["arm"]].items() if r < PILOT_WINDOW[0]]
+        entries.append({"arm": run["summary"]["arm"], "what": run["summary"]["what"], "status": run["summary"]["status"],
+                        "diverged_round": summary.get("diverged_round"), "metrics": metrics, "max_gap_before_window": max(before, default=None)})
+    marks = sorted({r for values in drops.values() for r in values if r % 8 == 0 and r >= PILOT_WINDOW[0] - 9})
+    curve = [{"round": r, "clean": clean_at[r], **{arm: values.get(r) for arm, values in drops.items()}} for r in marks]
+    return {"twin": twin["summary"]["arm"], "twin_source": twin["summary"].get("source", "this session"), "window": list(PILOT_WINDOW),
+            "arms": entries, "curve": curve}
 
 
 def attribution(run_dir, fields):
@@ -360,6 +394,10 @@ def render(data):
     add("\nForward-equivalents: one forward pass through all blocks for one batch; a backward pass costs two (accounting model, not a measurement).")
     add("\nSpeed of learning. No arm has converged after the base number of rounds, so the final accuracy largely measures speed:\n")
     add(speed_table(data))
+
+    if data.get("pilot"):
+        add("\n## 2c. E3 pilot: how much does one faulty device hurt HO-FL's default?\n")
+        add(pilot_section(data["pilot"]))
 
     add("\n## 3. H1a: is the gain of biased sampling a matter of dilution?\n")
     h1a = data["h1a"]
@@ -525,6 +563,37 @@ def zo_section(data):
     return "\n".join(out)
 
 
+def pilot_section(pilot):
+    out = []
+    add = out.append
+    signed = lambda value: "n/a" if value is None else f"{value:+.2f}"  # noqa: E731
+    first, last = pilot["window"]
+    add(f"One preferred T1 device (in the cohort in about 80% of rounds under beta = 0.75) is faulty in rounds {first} to {last}. "
+        f"Each faulty run is compared with the same training without the fault, `{pilot['twin']}` ({pilot['twin_source']}): same seed, "
+        f"data stream and first {first - 1} rounds, so every gap is the effect of the fault. Metrics of brief section 6.11, in accuracy "
+        "points (drop = without the fault minus with it); recovery counts the rounds after the window until the drop stays within "
+        "0.5 for two evaluations.\n")
+    rows = []
+    for entry in pilot["arms"]:
+        metrics = entry["metrics"]
+        status = entry["status"] + (f" at round {entry['diverged_round']}" if entry.get("diverged_round") else "")
+        if metrics is None:
+            rows.append([entry["arm"], entry["what"], status, "no common evaluation in the window", "", "", "", ""])
+            continue
+        rows.append([entry["arm"], entry["what"], status, signed(metrics["mean_drop"]), f"{signed(metrics['max_drop'])} (round {metrics['max_drop_round']})",
+                     "censored" if metrics["recovery_censored"] else str(metrics["recovery_rounds"]),
+                     f"{signed(metrics['final_gap'])} (round {metrics['final_round']})", fmt(entry["max_gap_before_window"], 2)])
+    add(table(["arm", "fault", "status", "mean drop in window", "largest drop", "recovery rounds", "final gap",
+               f"largest gap before round {first} (must be 0)"], rows))
+    if pilot["curve"]:
+        arms = [entry["arm"] for entry in pilot["arms"]]
+        add("\nAccuracy without the fault, and the drop each fault causes:\n")
+        add(table(["round", "no fault %", *[f"drop {arm}" for arm in arms]],
+                  [[f"{point['round']} (fault)" if first <= point["round"] <= last else point["round"], f"{point['clean']:.2f}",
+                    *[signed(point.get(arm)) for arm in arms]] for point in pilot["curve"]]))
+    return "\n".join(out)
+
+
 def findings(data):
     lines = []
     if data["tiny"]:
@@ -538,6 +607,19 @@ def findings(data):
     canary_record = data.get("canary")
     if canary_record and not canary_record["identical"]:
         lines.append("A-b0.75-attr did not reproduce session 1: results of the two sessions must not be paired; compare only arms of this session.")
+    for entry in (data.get("pilot") or {}).get("arms", []):
+        metrics = entry["metrics"]
+        if entry["status"] == "DIVERGED":
+            lines.append(f"E3 pilot, {entry['arm']}: diverged at round {entry['diverged_round']}. Under the equal-weight mean this fault breaks "
+                         "HO-FL's default, so every faulty E3 arm needs on_nonfinite=stop and divergence counts as not recovered.")
+        elif metrics:
+            lines.append(f"E3 pilot, {entry['arm']}: mean drop {metrics['mean_drop']:+.2f} points in the window, largest {metrics['max_drop']:+.2f} at round "
+                         f"{metrics['max_drop_round']}, " + ("not recovered" if metrics["recovery_censored"] else f"recovered {metrics['recovery_rounds']} rounds after the window")
+                         + f", final gap {metrics['final_gap']:+.2f}. "
+                         + ("Measurable: E3 can separate configurations with this fault." if metrics["max_drop"] >= PILOT_VISIBLE else
+                            f"Below {PILOT_VISIBLE:g} point: with this fault E3 could not separate configurations; strengthen it or change the window before coding the E3 grid."))
+        if entry.get("max_gap_before_window"):
+            lines.append(f"E3 pilot, {entry['arm']}: differs from its twin before the fault starts (up to {entry['max_gap_before_window']:.2f} points), so the pairing does not hold.")
     check = data.get("zo_check")
     if check:
         bf16 = [row for row in check["rows"] if row["precision"] == "bfloat16" and row["mu"] == 1e-3 and row["correlation"] is not None]
@@ -632,7 +714,7 @@ def main(argv=None):
     parser.add_argument("--root", default="outputs/p1", help="directory that receives every result of the pipeline")
     parser.add_argument("--model", choices=["qwen", "opt"], default="qwen")
     parser.add_argument("--seeds", default="42", help="comma-separated seeds; the queue goes seed by seed")
-    parser.add_argument("--blocks", default="5,6,4", help="blocks of arms.json to queue (blocks 1-3 ran in session 1 and come from references/)")
+    parser.add_argument("--blocks", default="5,7,6,4", help="blocks of arms.json to queue (blocks 1-3 ran in session 1 and come from references/)")
     parser.add_argument("--rounds", type=int, default=0, help="rounds per run (default 160; other values are not comparable with the paper)")
     parser.add_argument("--jobs", type=int, default=1, help="runs that may share the GPU; limited further by the measured memory per run")
     parser.add_argument("--device", default="cuda")

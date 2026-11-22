@@ -1,0 +1,1 @@
+{"faults": [{"select": {"role": "preferred_t1", "count": 1}, "rounds": [41, 80], "kind": "lr_scale", "params": {"scale": 20}}]}

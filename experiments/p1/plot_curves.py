@@ -2,7 +2,8 @@
 """Figures of the P1 feedback: test curves with a legend that says what every curve is.
 
 Reads feedback_P1.json (written by `p1.py feedback`) and writes p1_curves.png (the ablation ladder) and, when
-control arms were run, p1_controls.png. Needs matplotlib only, so it runs in the notebook's own Python.
+their arms were run, p1_zo_check.png (the authors' zeroth-order statements), p1_e3_pilot.png (the E3 pilot) and
+p1_controls.png. Needs matplotlib only, so it runs in the notebook's own Python.
 
     python experiments/p1/plot_curves.py <feedback_P1.json> <output directory>
 
@@ -51,18 +52,20 @@ CONTROLS = [
     ("Ax2-b0", arm(BLUE, "published method, uniform sampling, step x2", SOLID, "^", True)),
     ("C-b0", arm(ORANGE, "fo_mean, uniform sampling", SOLID)),
     ("Cx2-b0", arm(ORANGE, "fo_mean, uniform sampling, step x2", SOLID, "^", True)),
-    ("A-b0.75", arm(BLUE, "published method, biased sampling", DASHED)),
-    ("Ax2-b0.75", arm(BLUE, "published method, biased sampling, step x2", DASHED, "^", True)),
     ("fedavg", arm(INK_2, "FedAvg", DASHDOT)),
     ("fedavg-x2", arm(INK_2, "FedAvg, step x2", DASHDOT, "^", True)),
-    ("More zeroth-order directions", None),
-    ("A-b0-q8", arm(AQUA, "published method, uniform sampling, q = 8", SOLID, "x", True)),
     ("Three times as many rounds (right panel)", None),
     ("A-b0-r480", arm(BLUE, "published method, uniform sampling", SOLID, "o", True)),
     ("C-b0-r480", arm(ORANGE, "fo_mean, uniform sampling", SOLID, "o", True)),
-    ("Ax3-b0-r480", arm(AQUA, "published method, server step x3", SOLID, "D", True)),
 ]
-LONG = ("A-b0-r480", "C-b0-r480", "Ax3-b0-r480")
+LONG = ("A-b0-r480", "C-b0-r480")
+PILOT = [
+    ("HO-FL default (beta = 0.75); one preferred T1 device faulty in rounds 41-80", None),
+    ("A-b0.75-attr", arm(BLUE, "no fault", SOLID)),
+    ("B2-lr20", arm(ORANGE, "its local learning rate x20", SOLID)),
+    ("B2-label", arm(AQUA, "its labels shifted to the next class", SOLID)),
+]
+PILOT_WINDOW = (41, 80)
 ZO_CHECK = [
     ("HO-FL default (beta = 0.75), heterogeneous boundaries", None),
     ("A-b0.75", arm(BLUE, "zeroth-order updates on (published HO-FL)", SOLID)),
@@ -101,9 +104,11 @@ def read_curves(data):
     return curves
 
 
-def draw_panel(axis, curves, rows, metric, title, window=None, skip=()):
+def draw_panel(axis, curves, rows, metric, title, window=None, skip=(), shade=None):
     index = 1 if metric == "accuracy" else 2
     values = []
+    if shade:
+        axis.axvspan(shade[0], shade[1], color=GRID, alpha=0.55, linewidth=0, zorder=1)
     for key, spec in rows:
         if spec is None or key not in curves or key in skip:
             continue
@@ -132,6 +137,8 @@ LADDER_NOTE = ("Solid = uniform sampling, dashed = biased sampling.\n"
                "Hollow markers without a line = the same arm with the zeroth-order updates off;\n"
                "where they sit on the line, switching them off changes nothing.\n"
                "With several seeds: mean over seeds, single seeds thin behind it.")
+PILOT_NOTE = ("Shaded: fault window. The runs share seed, data stream and the first 40 rounds,\n"
+              "so every gap after round 40 is the effect of the fault.")
 ZO_NOTE = ("Lines: zeroth-order updates on. Hollow markers without a line: the same run\n"
            "with the bottom frozen (zeroth-order updates off, direct averaging);\n"
            "where they sit on the line, the zeroth-order updates change nothing.")
@@ -193,6 +200,10 @@ def main(feedback_json, out_dir):
         written.append(figure_for(curves, ZO_CHECK, f"{header}: do the zeroth-order updates help?", [
             dict(metric="accuracy", title="Test accuracy (%), higher is better"),
             dict(metric="loss", title="Test loss, lower is better")], out_dir / "p1_zo_check.png", "final\naccuracy %", note=ZO_NOTE))
+    if any(key in curves for key in ("B2-lr20", "B2-label")):
+        written.append(figure_for(curves, PILOT, f"{header}: E3 pilot, one faulty device", [
+            dict(metric="accuracy", title="Test accuracy (%), higher is better", shade=PILOT_WINDOW),
+            dict(metric="loss", title="Test loss, lower is better", shade=PILOT_WINDOW)], out_dir / "p1_e3_pilot.png", "final\naccuracy %", note=PILOT_NOTE))
     if any(key in curves for key, spec in CONTROLS if spec and key not in dict(LADDER)):
         written.append(figure_for(curves, CONTROLS, f"{header}: controls (not proposed methods)", [
             dict(metric="accuracy", title=f"Test accuracy (%), {rounds}-round arms, rounds {late[0]}-{late[1]}", window=late, skip=LONG),
