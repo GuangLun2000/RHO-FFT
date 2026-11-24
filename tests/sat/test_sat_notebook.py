@@ -45,9 +45,12 @@ class Colab:
         monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
         colab = types.ModuleType("google.colab")
         colab.runtime = types.SimpleNamespace(unassign=lambda: self.events.append("release"))
-        colab.files = types.SimpleNamespace(download=lambda path: self.events.append(("download", Path(path).name)))
         monkeypatch.setitem(sys.modules, "google", types.ModuleType("google"))
         monkeypatch.setitem(sys.modules, "google.colab", colab)
+        # The bundle goes to the browser inside the cell's output: a link, clicked by the page itself when asked to.
+        import IPython.display
+        monkeypatch.setattr(IPython.display, "display", lambda html: self.events.append(
+            ("bundle", "auto" if "a.click();" in html.data else "link", 'download="session3_bundle.zip"' in html.data and "emlw" in html.data)))
 
     def command(self, command):
         shown = command if isinstance(command, str) else " ".join(str(part) for part in command)
@@ -110,14 +113,16 @@ def test_a_session_runs_the_stages_in_order_and_ends_with_feedback_and_release(t
     assert len(budgeted) == 5 and all(f"--deadline {namespace['DEADLINE'] - 300}" in shown and "--force" not in shown for shown in budgeted)
     assert all("--cache-dir" in shown and "--device cuda" in shown for shown in colab.commands if "e0.py" in shown and "--tiny" not in shown)
     # The report is printed twice (before the long HO-FL runs and at the end), each time with a download; then the GPU goes back.
-    assert colab.events == [("download", "session3_bundle.zip"), ("download", "session3_bundle.zip"), "release"]
+    # (the bytes b"zip" of the stand-in bundle are "emlw" in base64: they travel in the output, no request goes back to the runtime)
+    assert colab.events == [("bundle", "link", True), ("bundle", "auto", True), "release"]
     printed = capsys.readouterr().out
     assert printed.count("反馈报告：从下一行开始复制") == 2 and printed.count("# 报告正文") == 2 and printed.count("反馈报告：复制到上一行为止") == 2
     assert printed.index("# 7 · HO-FL") > printed.index("# Feedback so far") and printed.rindex("# 报告正文") > printed.index("# 7 · HO-FL")
     # The interim report is told that the HO-FL runs are still to come; the final one is not.
     reports = [shown for shown in colab.commands if "e0.py feedback" in shown]
     assert ["--pending t0" in shown for shown in reports] == [True, False] and all("--quiet" in shown for shown in reports)
-    assert "| step | question | what the answer decides | time | this session |" in printed and "Releasing the GPU runtime in 30 seconds" in printed
+    assert "| step | question | what the answer decides | time | this session |" in printed and "Releasing the GPU runtime in 15 seconds" in printed
+    assert "google.colab import files" not in builder.text()   # that download needs an idle kernel, which this notebook never offers
     steps = [title for title in namespace["STATUS"] if title[0].isdigit()]
     assert [title[0] for title in steps] == list("1234567") and all(namespace["STATUS"][title] == "ok" for title in steps)
     session = json.loads((colab.root / "work" / "sat" / "session.json").read_text())
@@ -142,7 +147,7 @@ def test_switches_and_the_budget_decide_what_is_called(tmp_path, monkeypatch, ca
     assert not any("--tiny" in shown for shown in colab.commands) and colab.events == []
     assert all("--force" in shown for shown in colab.commands if "e0.py smoke" in shown)
     printed = capsys.readouterr().out
-    assert printed.count("反馈报告：从下一行开始复制") == 1 and "RELEASE_GPU is off" in printed and "NOT downloaded" in printed
+    assert printed.count("反馈报告：从下一行开始复制") == 1 and "RELEASE_GPU is off" in printed and "NOT available" in printed
     assert namespace["STATUS"]["4 · Peak GPU memory of a participation per cut"] == "switched off"
     # A budget that is used up: nothing new starts, the feedback is still written and the GPU released.
     spent = Colab(tmp_path / "spent", monkeypatch, BUDGET_HOURS=0.0, RUN_DRY_RUN=False)
@@ -160,6 +165,6 @@ def test_an_error_prints_the_feedback_and_releases_the_gpu(tmp_path, monkeypatch
     shown = []
     colab.handlers[0](types.SimpleNamespace(showtraceback=lambda info, tb_offset=None: shown.append(info[0])), RuntimeError, RuntimeError("x"), None)
     assert shown == [RuntimeError] and colab.stages()[-1] == ["feedback"]
-    assert colab.events == [("download", "session3_bundle.zip"), "release"]
+    assert colab.events == [("bundle", "auto", True), "release"]
     printed = capsys.readouterr().out
     assert "# Feedback of what ran before the error" in printed and "# 报告正文" in printed

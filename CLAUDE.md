@@ -108,7 +108,8 @@ Code, then a Colab session, then the feedback report, then code again (`experime
 - **The notebook.** `notebooks/RHO-FFT_colab.ipynb` is generated: edit `notebooks/build_notebook.py`, run it, and
   let `tests/sat/test_sat_notebook.py` execute the cells with every external effect stubbed. Never edit the `.ipynb` by
   hand. The notebook must always reach its last cell: steps record failures instead of raising, and the GPU is
-  released at the end and after any error.
+  released at the end and after any error. Files leave Colab inside cell output (`download_results`), never through
+  `google.colab.files.download`: that one needs an idle kernel, and a cell that then releases the runtime is not.
 
 ## Do not spend tokens on
 

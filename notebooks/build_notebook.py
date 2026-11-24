@@ -90,7 +90,7 @@ RUN_DAY_RUNS = True  #@param {type:"boolean"}
 RUN_HOFL_SEEDS = True  #@param {type:"boolean"}
 # Run a step even when a step it builds on did not pass (not recommended: its results rest on unverified code).
 FORCE = False  #@param {type:"boolean"}
-# Download the result bundle through the browser before the runtime is released.
+# Put the result bundle into the page (a link, and an automatic download at the end) before the runtime is released.
 DOWNLOAD_BUNDLE = True  #@param {type:"boolean"}
 # Release the GPU runtime after the last cell, and after an error in any cell.
 RELEASE_GPU = True  #@param {type:"boolean"}
@@ -193,19 +193,35 @@ def stop(message):
     raise RuntimeError(message)
 
 
-def download_results():
-    # Send the result bundle (logs and JSON files of every run, the feedback report) to the browser. Returns whether
-    # a download was started.
+def download_results(auto=True):
+    # Hand the result bundle (logs and JSON files of every run, the feedback report) to the browser. Returns whether
+    # it was handed over.
+    #
+    # google.colab.files.download cannot do this here. It only shows a script; the browser then asks the kernel for
+    # the file over a comm, and the kernel answers such a request only once it is idle. A cell that goes on to
+    # sleep and release the runtime never is, however long it sleeps, so that download never starts. Instead the
+    # bytes travel inside this cell's output: the browser builds the file from what it already has, without asking
+    # the runtime for anything, and the link keeps working after the runtime is gone. ``auto`` also starts the download.
     source = Path(WORK) / "feedback" / "feedback_E0_bundle.zip"
     if not (DOWNLOAD_BUNDLE and source.exists()):
         return False
+    megabytes = source.stat().st_size / 1e6
+    if megabytes > 20:
+        print(f"The result bundle has {megabytes:.0f} MB, too much to pass through the page; the report above is the record.")
+        return False
     try:
-        shutil.copy2(source, BUNDLE)
-        from google.colab import files
-        files.download(BUNDLE)
+        import base64
+        import uuid
+        from IPython.display import HTML, display
+        name, link = Path(BUNDLE).name, "bundle-" + uuid.uuid4().hex
+        display(HTML(
+            f'<a id="{link}" download="{name}" style="font-size:15px">结果包 {name}（{megabytes:.1f} MB）：点这里下载</a>'
+            f'<script>(function() {{ const bytes = Uint8Array.from(atob("{base64.b64encode(source.read_bytes()).decode("ascii")}"), c => c.charCodeAt(0));'
+            f' const a = document.getElementById("{link}"); a.href = URL.createObjectURL(new Blob([bytes], {{type: "application/zip"}}));'
+            f' {"a.click();" if auto else ""} }})();</script>'))
         return True
     except Exception as error:
-        print("download failed:", repr(error))
+        print("the result bundle could not be handed to the browser:", repr(error))
         return False
 
 
@@ -229,8 +245,8 @@ def _release_on_error(shell, etype, value, traceback, tb_offset=None):
         print_feedback("Feedback of what ran before the error")
     except Exception as error:
         print("the feedback report could not be built:", repr(error))
-    started = download_results()
-    release_gpu(30 if started else 10)
+    download_results()
+    release_gpu(15)
 
 
 # Manual interruption (KeyboardInterrupt) is not an Exception and does not release the runtime.
@@ -522,14 +538,14 @@ run_stage("6 · Day-long runs on EuroSAT: the full method and the centralised re
 md(r'''
 ## 反馈（中期）：卫星部分
 
-第 7 步与卫星代码无关，要跑约 40 分钟。卫星部分到这里已经全部跑完，所以先打印一份报告并下载结果包：可以现在就把它复制回来，不必等。最后一节会再打印一份完整的（多出第 7 步的结果）。第 7 步关掉时，这一格什么也不做。
+第 7 步与卫星代码无关，要跑约 40 分钟。卫星部分到这里已经全部跑完，所以先打印一份报告，并给出结果包的下载链接（不自动下载）：可以现在就把报告复制回来，不必等。最后一节会再打印一份完整的（多出第 7 步的结果）。第 7 步关掉时，这一格什么也不做。
 ''')
 
 code(r'''
 #@title Feedback so far · the satellite part
 if RUN_HOFL_SEEDS:
     print_feedback("Feedback so far: the satellite part (the HO-FL runs follow)", pending="t0")
-    print("\nresult bundle:", "download started" if download_results() else "not downloaded")
+    print("\nresult bundle:", "link above (kept in the page; the final section downloads it)" if download_results(auto=False) else "not available")
 else:
     print("The HO-FL runs are switched off; the feedback of the whole session follows in the last section.")
 ''')
@@ -562,7 +578,7 @@ md(r'''
 5. **失败与异常**：每个失败步骤的日志末尾。
 6. **没有运行的部分与下一步**：哪些被跳过、为什么；下一次会话该开哪些开关。
 
-之后浏览器下载结果包 `session3_bundle.zip`（每次运行的日志和 JSON），再释放 GPU。释放之后页面上的输出仍然保留。
+之后浏览器下载结果包 `session3_bundle.zip`（每次运行的日志和 JSON），再释放 GPU。结果包的内容直接放在这一格的输出里，下载不需要再向运行时要数据：如果浏览器没有自动下载（例如拦截了自动下载），点输出里的“点这里下载”即可，GPU 释放之后也能点。释放之后页面上的输出仍然保留；关掉页面之前记得把结果包存下来。
 ''')
 
 code(r'''
@@ -573,8 +589,9 @@ print("| step | status |\n| --- | --- |")
 for name, state in STATUS.items():
     print(f"| {name} | {state} |")
 started = download_results()
-print("\nresult bundle:", "download started (session3_bundle.zip)" if started else "NOT downloaded; the report above is the record of this session")
-release_gpu(30 if started else 10)
+print("\nresult bundle:", "download started (session3_bundle.zip); the link above works too, also after the GPU is released" if started
+      else "NOT available; the report above is the record of this session")
+release_gpu(15)
 ''')
 
 md(r'''
