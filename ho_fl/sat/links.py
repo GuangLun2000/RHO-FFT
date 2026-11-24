@@ -62,6 +62,10 @@ class LinkBudget:
         self.laser = trace.edge_kind == EDGE_LASER
         self.rate_bps = np.where(self.laser, laser_gbps * 1e9, inter_satellite_radio(rf_gain_dbi).rate_bps(self.distance_km))
         self.tx_power_w = np.where(self.laser, LASER_TX_POWER_W, RF_TX_POWER_W)
+        self.energy_per_byte = self.tx_power_w * 8 / self.rate_bps        # joules the sender spends per byte, per edge
+        ends = trace.edges.astype(int)
+        self.node_energy_per_byte = (np.bincount(ends[:, 0], self.energy_per_byte, trace.count)
+                                     + np.bincount(ends[:, 1], self.energy_per_byte, trace.count))   # over all links of a satellite
 
     def hop(self, a, b, payload_bytes):
         """Delay of one hop between neighbouring satellites ``a`` and ``b``."""

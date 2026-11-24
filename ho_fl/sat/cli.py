@@ -64,7 +64,15 @@ def trace_main(argv=None):
     return 1 if failed else 0
 
 
-train_main = _later("ho-fl-sat-train", "P-S3")
+def train_main(argv=None):
+    """One training run of the satellite scenario; the options are the fields of ``SatConfig``."""
+    from .config import parse_sat_config
+    from .engine import run
+
+    run(parse_sat_config(argv))
+    return 0
+
+
 tune_main = _later("ho-fl-sat-tune", "P-S4")
 topology_main = _later("ho-fl-sat-topology", "P-S7")
 figures_main = _later("ho-fl-sat-figures", "P-S7")

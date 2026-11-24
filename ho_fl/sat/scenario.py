@@ -244,6 +244,9 @@ class Trace:
         self.slot_s = meta["slot_s"]
         self.sha256 = meta["trace_sha256"]
         self.edge_index = {(int(a), int(b)): index for index, (a, b) in enumerate(self.edges)}
+        self.edge_matrix = np.full((self.count, self.count), -1, dtype=np.int32)   # edge between two satellites, or -1
+        ends = self.edges.astype(int)
+        self.edge_matrix[ends[:, 0], ends[:, 1]] = self.edge_matrix[ends[:, 1], ends[:, 0]] = np.arange(len(ends))
 
     def edge(self, a, b):
         """Index of the edge between two neighbouring satellites."""

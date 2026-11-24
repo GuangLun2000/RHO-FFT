@@ -94,9 +94,11 @@ class SatBackend:
     def full_bytes(self):
         return 4 * self.total
 
+    beacon_bytes = 18   # header of a report: sender, round, cut; flooded alone when there is no zeroth-order part
+
     def zo_bytes(self):
-        """Bytes of a zeroth-order report: an 18-byte header and one float32 scalar per local step and direction."""
-        return 18 + 4 * self.cfg.E * self.cfg.q
+        """Bytes of a zeroth-order report: the header and one float32 scalar per local step and direction."""
+        return self.beacon_bytes + 4 * self.cfg.E * self.cfg.q
 
     def split_size(self, split):
         return len(self.data[split]["labels"])

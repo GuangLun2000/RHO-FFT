@@ -46,6 +46,7 @@ ZONLY_EVENTS = 2              # HumAID: the last events in name order are held o
 ZONLY_CLASS = 8               # EuroSAT: the class with this number in the dataset's label order is held out
 T1_EVAL_SUBSET = 4000         # HumAID curves use a fixed subset of the test split of this size
 VERBALIZER_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+MANIFEST_SCHEMA = 2           # layout of the partition file; a file of another layout is refused, not silently rebuilt
 
 
 def data_dir(cache_dir, dataset, tiny=False):
@@ -400,7 +401,7 @@ def build_manifest(task, data, seed, variant="base", planes=12, per_plane=10):
     flat = [index for record in satellites for index in record["indices"]]
     assert len(flat) == len(set(flat)) == roles.count * per_satellite and not set(flat) & set(unused)
     assert len({len(record["indices"]) for record in satellites}) == 1
-    manifest = {"schema": 1, "task": task.key, "dataset": task.dataset, "variant": variant, "seed": seed, "planes": planes,
+    manifest = {"schema": MANIFEST_SCHEMA, "task": task.key, "dataset": task.dataset, "variant": variant, "seed": seed, "planes": planes,
             "per_plane": per_plane, "examples_per_satellite": per_satellite, "train_examples": total,
             "classes": list(data["classes"]), "data_sha256": data["meta"]["sha256"], "labels_sha256": labels_hash(data),
             "parameters": {"main_share": MAIN_SHARE[0] / MAIN_SHARE[1], "plane_alpha": PLANE_ALPHA, "satellite_alpha": SATELLITE_ALPHA,
@@ -419,6 +420,8 @@ def load_manifest(cfg, data):
     raw = path.read_bytes()
     manifest = json.loads(raw)
     count = cfg.satellites
+    if manifest.get("schema") != MANIFEST_SCHEMA:
+        raise ValueError(f"{path} was written by another version of the partition code; remove it to have it rebuilt")
     if manifest["labels_sha256"] != labels_hash(data):
         raise ValueError(f"{path} was built from other labels than the ones loaded now")
     if manifest["partition_sha256"] != partition_hash(manifest):
