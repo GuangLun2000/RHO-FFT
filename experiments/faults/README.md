@@ -1,5 +1,8 @@
 # Fault specifications
 
+> Earlier phase (brief v1.1, git history only): fault files of the suspended resilience comparison. The faults of
+> the satellite scenario (brief v2, section 6.3 and experiment E3) are not defined here.
+
 Fault files of the brief's E3 (section 7) for one unreliable device, read by `ho_fl/faults.py` (format in its
 docstring). Paths in `experiments/p1/arms.json` are relative to the repository root.
 

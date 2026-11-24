@@ -1,6 +1,9 @@
 # P0: golden values, regression and the E0 reproduction
 
-`p0.py` runs the GPU steps of milestone P0 and writes a feedback report. `notebooks/backup/P0_colab.ipynb` (an earlier session; the current notebook is `notebooks/RHO-FFT_colab.ipynb`) drives it on
+> Still in use: the satellite work runs this baseline regression before every GPU session (invariants I1 and I2
+> of `docs/RHO-FFT-agent-brief-v2.md`). "The brief" below is the earlier brief v1.1 (git history only).
+
+`p0.py` runs the GPU steps of milestone P0 and writes a feedback report. `notebooks/RHO-FFT_colab.ipynb` drives it on
 Colab; the same commands work on any machine with a CUDA GPU.
 
 ```bash

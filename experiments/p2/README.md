@@ -1,7 +1,10 @@
 # P2, first part: the dose-response experiment (E2)
 
+> Earlier phase (brief v1.1, git history only), not part of the satellite work; "the brief" below is that one.
+> Its end-to-end comparison is suspended (brief v2, header table).
+
 `p2.py` runs experiment E2 of the brief (hypothesis H2, the quorum crossover) and writes a feedback report.
-`notebooks/backup/P2_colab.ipynb` (an earlier session; the current notebook is `notebooks/RHO-FFT_colab.ipynb`) drives it on Colab after the baseline regression of `experiments/p0`.
+`notebooks/RHO-FFT_colab.ipynb` drives it on Colab after the baseline regression of `experiments/p0`.
 
 ```bash
 python experiments/p2/p2.py base dose feedback --root outputs/p2 --jobs 2 --budget-hours 4

@@ -64,7 +64,7 @@
 ## 5 与实现说明不一致之处、未解决的问题、需要决定的事项
 
 1. **`tests/golden/` 里没有黄金值。** 该目录的说明写着"尚未记录任何文件"。I1 实际由两处保证：测试里冻结的上游副本（`tests/legacy_loop.py`、`tests/legacy_steps.py`），以及 `experiments/p0/p0.py` 在同一块 GPU 上与上游提交的对比。实现说明 §2.2 提到的"黄金值不变"按后者理解。
-2. **状态报告的位置。** 实现说明引用 `docs/reports/status-2026-11-22.md`，实际文件在 `docs/old_version/reports/` 下（工作区里旧的计划和报告都移到了 `docs/old_version/`，这一移动没有提交，我没有动它）。
+2. **状态报告的位置。** 实现说明引用 `docs/reports/status-2026-11-22.md`，写报告时该文件在 `docs/old_version/reports/` 下。2026-11-24 按研究负责人的要求清理了旧文档：v1.1 阶段的实现说明、计划、P0–P2 报告和状态报告都已从工作区删除。前三类可以从 git 历史取回（`git show a9be57b:docs/reports/P1.md`、`git show 6920b4b:cluade_doc/RHO-FFT-agent-brief-v1.1.md`）；状态报告从未提交过，实现说明 v2 的 §1.6 和 §3 摘录了它与本任务有关的数字。
 3. **`Config.scenario` 只放宽 `n == 30`。** `Config.resolve()` 还会拒绝上游表里没有的模型和数据集（`vit`、`humaid`、`eurosat`），`verbalizers` 和 `max_length` 也是按上游数据集查表。所以卫星路径用一个 `Config` 的子类（`ho_fl/sat/config.py` 的 `TrainConfig`，由任务给出 verbalizer 和长度），并且不调用上游的 `resolve()`。`ho_fl/data.py` 的 manifest 检查没有改，卫星路径有自己的 manifest。
 4. **可选依赖组 `sat` 多了一个 `pillow==11.3.0`。** EuroSAT 的图像以 JPEG 存储，解码需要 Pillow，而现有依赖里没有它。
 5. **`ho-fl-sat-tune`、`ho-fl-sat-topology`、`ho-fl-sat-figures` 三个入口已登记，但还没有实现**，运行时会提示所属的里程碑（P-S4、P-S7）。
