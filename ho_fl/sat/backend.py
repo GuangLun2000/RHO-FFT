@@ -43,14 +43,16 @@ class SatBackend:
             assert len(set(tokens.tolist())) == classes, "verbalizers must be distinct single tokens"
             cached = load_humaid_tokens(sat.cache_dir, raw, tokenizer, task.model, task.max_length, sat.tiny)
             data = {split: cached[split] for split in SPLITS}
+            token_meta = {key: cached["meta"][key] for key in ("max_length", "longest", "truncated", "truncation_side")}
         else:
             cfg = sat.train_config()
             model, wrapper, params = load_vit(cfg, classes, task.depth)
-            tokenizer, tokens = None, None
+            tokenizer, tokens, token_meta = None, None, None
             data = {split: {"images": torch.as_tensor(raw[split]["images"]).to(cfg.device),
                             "labels": torch.as_tensor(raw[split]["labels"], dtype=torch.long).to(cfg.device)} for split in SPLITS}
         self._assemble(task, cfg, model, wrapper, params, tokenizer, tokens, data, manifest["satellites"], classes)
         self.sat, self.manifest, self.manifest_id, self.manifest_bytes = sat, manifest, manifest_id, manifest_bytes
+        self.token_meta = token_meta   # text tasks: the longest prompt and how many prompts reached the maximum length
         self.data_sha256, self.class_names = raw["meta"]["sha256"], list(raw["classes"])
         # Evaluation sets (brief 7.1, 7.2): HumAID curves use a fixed subset of 4,000 examples, chosen by name
         # only, and the last evaluation of a test run uses the whole split; EuroSAT always uses the whole split.
@@ -81,7 +83,7 @@ class SatBackend:
         self.dimensions = {cut: sum(p.numel() for p in bottom.values()) for cut, bottom in self.bottoms.items()}
         self.total = sum(p.numel() for p in params.values())
         self.image_size = wrapper.lm.config.image_size if task.kind == "vision" else None
-        self.processed_tokens = 0
+        self.processed_tokens, self.token_meta = 0, None
 
     # --- sizes -----------------------------------------------------------------------------------------------------
 

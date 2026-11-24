@@ -121,6 +121,13 @@ def test_run_writes_its_files(runs):
     assert summary["status"] == "COMPLETED" and summary["last_evaluation"]["sim_hours"] == 1.0 and summary["final_evaluation"] is None
     assert summary["final_parameter_sha256"]["0"] != summary["initial_parameter_sha256"]
     assert set(summary["energy_wh_per_satellite_day"]) == {"compute", "transmit"} and summary["bytes_per_day"]["laser"] > 0
+    # Wall times are logged next to the results: per participation, per round with its parts, and their sums.
+    assert all(row["wall_s"] > 0 for row in ledger) and all(set(row["wall_parts_s"]) == {"train", "deliver", "aggregate", "log"} for row in rounds)
+    assert all(sum(row["wall_parts_s"].values()) <= row["wall_s"] + 1e-6 for row in rounds)
+    parts = summary["wall_breakdown_s"]
+    assert set(parts) == {"startup", "train", "deliver", "aggregate", "log", "evaluation"} and sum(parts.values()) <= summary["wall_s"] + 1e-6
+    assert parts["train"] == pytest.approx(sum(row["wall_parts_s"]["train"] for row in rounds))
+    assert parts["train"] >= sum(row["wall_s"] for row in ledger) - 1e-6 and config["prompt_tokens"] is None
     assert load_trace(cfg.trace_dir).sha256 == summary["trace_sha256"]
     with pytest.raises(RuntimeError):
         run(cfg)  # a run never writes into a directory that holds something
@@ -165,7 +172,7 @@ def test_runs_are_reproducible_and_depend_on_seed_and_step(make, runs):
     repeat = make(method="m7")
     again = run(repeat)
     assert again["final_parameter_sha256"] == summary["final_parameter_sha256"] and again["last_evaluation"]["accuracy"] == summary["last_evaluation"]["accuracy"]
-    strip = lambda rows: [{key: value for key, value in row.items() if key != "wall_s"} for row in rows]  # noqa: E731
+    strip = lambda rows: [{key: value for key, value in row.items() if not key.startswith("wall")} for row in rows]  # noqa: E731
     for name in ("rounds.jsonl", "ledger.jsonl", "eval.jsonl"):  # identical up to the measured wall time
         assert strip(read_jsonl(Path(cfg.output) / name)) == strip(read_jsonl(Path(repeat.output) / name))
     other_seed, larger_step = run(make(method="m7", seed=43)), run(make(method="m7", server_lr=3.0))
