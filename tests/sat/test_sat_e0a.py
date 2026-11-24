@@ -1,6 +1,9 @@
 """E0-a of the brief (section 10.1), items 2 to 5, on the tiny models. The checks themselves live in
 ``ho_fl.sat.selfcheck`` and also run on the GPU with the real models (stage S of the Colab notebook)."""
+import json
+
 import pytest
+import torch
 
 from ho_fl.sat import selfcheck
 from ho_fl.sat.backend import SatBackend
@@ -48,12 +51,35 @@ def test_item_5_replay_is_the_same_on_every_replica(task, assets):
     assert_all_passed(selfcheck.check_replay(backend(assets, task)), {5}, 2)
 
 
+@pytest.mark.parametrize("task", ["t1", "t2"])
+def test_estimator_diagnostic_compares_the_training_scalars_with_exact_derivatives(task, assets):
+    b = backend(assets, task)
+    before, cursor = {name: param.detach().clone() for name, param in b.params.items()}, b.streams[0].cursor
+    rows = selfcheck.check_estimator(b, directions=16, batches=2)
+    cuts = [cut for cut in b.cuts if cut > 0]
+    assert [(row["cut"], row["mu"]) for row in rows] == [(cut, mu) for cut in cuts for mu in selfcheck.ESTIMATOR_RADII]
+    assert all(row["finite"] and row["directions"] == 32 for row in rows) and [row["configured"] for row in rows] == [row["mu"] == b.cfg.mu for row in rows]
+    assert {row["dimension"] for row in rows if row["cut"] == cuts[-1]} == {b.dimensions[cuts[-1]]}
+    # At the configured radius the finite difference follows the exact directional derivative on the tiny models;
+    # at ten times that radius it has left the linear regime, which is what the diagnostic is there to show.
+    configured = [row for row in rows if row["configured"]]
+    assert len(configured) == len(cuts) and all(row["correlation"] > 0.8 and 0.5 < row["slope"] < 1.5 for row in configured)
+    assert min(row["correlation"] for row in configured) > max(row["correlation"] for row in rows if row["mu"] == 0.1)
+    # Nothing is trained, no gradient is left behind and no data stream is advanced.
+    assert all(torch.equal(param, before[name]) and param.grad is None for name, param in b.params.items()) and b.streams[0].cursor == cursor
+    table = selfcheck.render_estimator(rows, b.cfg.mu)
+    assert "0.01 (configured)" in table and table.count("\n| ") == len(rows) + 2
+
+
 def test_selfcheck_command(assets, tmp_path, capsys):
     arguments = [part for key, value in assets["t2"].items() if key != "tiny" for part in (f"--{key.replace('_', '-')}", str(value))]
     assert selfcheck.main([*arguments, "--tiny", "--output", str(tmp_path / "check")]) == 0
     printed = capsys.readouterr().out
-    assert "15 of 15 checks passed" in printed and "FAIL" not in printed
+    assert "15 of 15 checks passed" in printed and "FAIL" not in printed and "Zeroth-order scalars against exact directional derivatives" in printed
     assert (tmp_path / "check" / "selfcheck.json").exists() and (tmp_path / "check" / "selfcheck.md").exists()
+    record = json.loads((tmp_path / "check" / "selfcheck.json").read_text())
+    assert record["status"] == "PASSED" and record["mu"] == 0.01 and record["prompt_tokens"] is None and len(record["estimator"]) == 12
+    assert all({"worst", "bitwise"} <= set(row) for row in record["rows"]) and all(row["bitwise"] is not False for row in record["rows"])
 
 
 def test_a_failing_check_is_reported(assets, monkeypatch, tmp_path, capsys):

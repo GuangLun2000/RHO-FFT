@@ -3,8 +3,9 @@
 > Still in use: the satellite work runs this baseline regression before every GPU session (invariants I1 and I2
 > of `docs/RHO-FFT-agent-brief-v2.md`). "The brief" below is the earlier brief v1.1 (git history only).
 
-`p0.py` runs the GPU steps of milestone P0 and writes a feedback report. `notebooks/RHO-FFT_colab.ipynb` drives it on
-Colab; the same commands work on any machine with a CUDA GPU.
+`p0.py` runs the GPU steps of milestone P0 and writes a feedback report. On Colab the satellite pipeline calls its
+stages `env golden regress feedback` (stage `baseline` of `experiments/sat/e0/e0.py`); the same commands work on any
+machine with a CUDA GPU.
 
 ```bash
 python experiments/p0/p0.py env tests golden regress --root outputs/p0          # about 10 minutes of GPU time

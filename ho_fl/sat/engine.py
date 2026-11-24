@@ -18,6 +18,11 @@ Files written to the run directory:
     eval.jsonl     one row per evaluation
     summary.json   final metrics and the status: COMPLETED, or DIVERGED when values stopped being finite
     status.json    RUNNING / COMPLETED / DIVERGED / FAILED, as for upstream runs (the run harness reads it)
+
+Wall times of this process are logged next to the results and never enter them: ``wall_s`` of a participation,
+of a round (with its parts in ``wall_parts_s``) and of an evaluation, and their sums in ``wall_breakdown_s`` of the
+summary. They are what the GPU budget of the experiments is planned from. All of them are differences of a
+monotonic clock, so an adjustment of the system time cannot make one negative.
 """
 import time
 from collections import Counter
@@ -49,6 +54,13 @@ def _by_class(roles, values):
     return {kind: float(sum(values[sid] for sid in roles.members(kind))) for kind in CLASSES}
 
 
+def _clock(cuda):
+    """A monotonic clock, read after the device has finished what was queued (GPU work is asynchronous)."""
+    if cuda:
+        torch.cuda.synchronize()
+    return time.perf_counter()
+
+
 def _all_finite(tensors):
     """Whether every value of every tensor is finite (one synchronisation with the device)."""
     flags = [torch.isfinite(tensor).all() for tensor in tensors]
@@ -59,7 +71,7 @@ def evaluate(b, groups, initial, rounds_done, cfg, final=False):
     """One evaluation row: every replica group on the evaluation set, their plane-weighted mean and how far the
     replicas are apart. The last evaluation of a test run uses the whole split (HumAID curves use a subset)."""
     indices = b.final_indices if final else b.curve_indices
-    started, rows = time.time(), []
+    started, rows = time.perf_counter(), []
     for group in groups.ids:
         restore(b.params, groups.state(group))
         metrics = b.evaluate(b.eval_split, indices)
@@ -76,7 +88,7 @@ def evaluate(b, groups, initial, rounds_done, cfg, final=False):
               "replica_difference": replica_difference(groups, initial), "wall_s": None}
     for key in ("accuracy", "macro_f1", "loss") + (("held_out_accuracy", "held_out_macro_f1") if b.held_out_indices else ()):
         result[key] = sum(weight[row["group"]] * row[key] for row in rows)
-    result["wall_s"] = time.time() - started
+    result["wall_s"] = time.perf_counter() - started
     return result
 
 
@@ -88,7 +100,7 @@ def run(cfg):
     out.mkdir(parents=True, exist_ok=True)
     status = {"status": "RUNNING", "last_completed_round": 0}
     write_json(out / "status.json", status)
-    started = time.time()
+    started = time.perf_counter()
     try:
         method = METHODS[cfg.method]
         trace = ensure_trace(cfg.trace_dir, cfg.scenario, slot_s=cfg.slot_s)
@@ -103,7 +115,7 @@ def run(cfg):
         config = {**cfg.to_dict(), "rounds": cfg.rounds, "method_label": method.label, "method_switches": asdict(method),
                   "task_model": b.task.model, "task_dataset": b.task.dataset, "depth": b.task.depth, "cuts": b.cuts,
                   "first_order_bytes_by_cut": {str(cut): b.fo_bytes(cut) for cut in b.cuts}, "report_bytes": b.zo_bytes(),
-                  "trainable_parameters": b.total, "classes": b.class_names,
+                  "trainable_parameters": b.total, "classes": b.class_names, "prompt_tokens": b.token_meta,
                   "trace_sha256": trace.sha256, "land_source": trace.meta["land_source"],
                   "partition_sha256": b.manifest["partition_sha256"], "manifest_sha256": b.manifest_id,
                   "data_sha256": b.data_sha256, "initial_parameter_sha256": b.initial_hash, "git": git_head(REPO),
@@ -134,28 +146,38 @@ def run(cfg):
             except (AssertionError, ValueError):
                 return None
 
+        wall = Counter(startup=time.perf_counter() - started)   # loading the model, the data, the trace and the partition
+        evaluation_started = time.perf_counter()
         last = log_evaluation(0)
+        wall["evaluation"] += time.perf_counter() - evaluation_started
         diverged, total_loss, energy_total = None, [], {"compute": np.zeros(roles.count), "transmit": np.zeros(roles.count)}
         bytes_total, participations, wall_training = Counter(), Counter(), 0.0
         for r in range(cfg.rounds):
-            round_started = time.time()
+            round_started = _clock(cuda)
             view = trace.view(r, cfg.slots_per_round)
             budget = LinkBudget(trace, view, cfg.rf_gain_dbi, cfg.laser_gbps)
             times = timeline(cfg, budget, trace, b.full_bytes)
             decisions = decide(r, view, budget, times, batteries, method, cfg, b, roles)
             participants = sorted(sid for sid, decision in decisions.items() if decision.participate)
             # Local training, each participant from the replica of its plane.
-            reports = {sid: train_participation(b, groups.state(groups.of_plane(roles.plane(sid))), r, sid,
-                                                decisions[sid].cut, zo=decisions[sid].zo) for sid in participants}
+            reports, seconds, mark = {}, {}, _clock(cuda)
+            for sid in participants:
+                reports[sid] = train_participation(b, groups.state(groups.of_plane(roles.plane(sid))), r, sid,
+                                                   decisions[sid].cut, zo=decisions[sid].zo)
+                finished = _clock(cuda)
+                seconds[sid], mark = finished - mark, finished
             if not _all_finite(value for report in reports.values() for value in [*report.losses, *report.delta.values()]):
                 diverged = r   # detected before anything of this round is aggregated or logged
                 break
+            trained = _clock(cuda)
             delivery = deliver(trace, budget, times, decisions, b, method, cfg.round_s)
+            delivered = time.perf_counter()
             updates, _ = round_updates(groups, reports, delivery, b.cfg)
             groups.apply(updates, cfg.server_lr)
             if not _all_finite(tensor for group in groups.ids for tensor in groups.state(group).values()):
                 diverged = r
                 break
+            aggregated = _clock(cuda)
             # Energy: what the participants computed and what every satellite sent; then the batteries.
             compute = np.zeros(roles.count)
             for sid in participants:
@@ -183,7 +205,9 @@ def run(cfg):
                     "report_bytes": b.zo_bytes() if decision.zo else b.beacon_bytes,
                     "energy_compute_wh": decision.energy_cmp_j / 3600, "energy_transmit_wh": float(delivery.tx_energy_j[sid]) / 3600,
                     "battery_before": before[sid], "battery_after": batteries.share(sid), "train_loss": report.train_loss,
-                    "lottery": decision.lottery, "direction_master_seed": report.direction_master_seed, "fault": report.fault})
+                    "lottery": decision.lottery, "direction_master_seed": report.direction_master_seed, "fault": report.fault,
+                    "wall_s": seconds[sid]})
+            logged = time.perf_counter()
             invited = Counter(decision.kind for decision in decisions.values() if decision.invited)
             taking_part = Counter(decisions[sid].kind for sid in participants)
             skipped = Counter(decision.reason for decision in decisions.values() if decision.reason)
@@ -205,8 +229,13 @@ def run(cfg):
                 "skipped": {reason: skipped.get(reason, 0) for reason in SKIP_REASONS},
                 "battery_min": {kind: min((batteries.share(sid) for sid in roles.members(kind)), default=None) if kind != "B" else None
                                 for kind in CLASSES},
-                "task_loss": round_loss, "wall_s": time.time() - round_started})
-            wall_training += time.time() - round_started
+                "task_loss": round_loss, "wall_s": logged - round_started,
+                # Where the round's wall time went: local training, the network model (CPU), replay and aggregation, logging.
+                "wall_parts_s": {"train": trained - round_started, "deliver": delivered - trained,
+                                 "aggregate": aggregated - delivered, "log": logged - aggregated}})
+            wall_training += logged - round_started
+            wall.update(train=trained - round_started, deliver=delivered - trained, aggregate=aggregated - delivered,
+                        log=logged - aggregated)
             status["last_completed_round"] = r + 1
             write_json(out / "status.json", status)
             done = r + 1
@@ -215,7 +244,9 @@ def run(cfg):
                 print(f"round {done}/{cfg.rounds} ({done * cfg.round_s / 3600:.1f} h) | participants B {taking_part.get('B', 0)} "
                       f"H {taking_part.get('H', 0)} Z {taking_part.get('Z', 0)} | train loss {shown} | "
                       f"{wall_training / done:.2f} s per round", flush=True)
+                evaluation_started = time.perf_counter()
                 evaluated = log_evaluation_or_stop(done)
+                wall["evaluation"] += time.perf_counter() - evaluation_started
                 if evaluated is None:
                     diverged = r
                     break
@@ -223,7 +254,9 @@ def run(cfg):
             del reports, updates
         final = None
         if diverged is None and b.final_indices != b.curve_indices:
+            evaluation_started = time.perf_counter()
             final = log_evaluation_or_stop(cfg.rounds, final=True)
+            wall["evaluation"] += time.perf_counter() - evaluation_started
         outcome = "COMPLETED" if diverged is None else "DIVERGED"
         days = cfg.rounds * cfg.round_s / 86400
         members = {kind: len(roles.members(kind)) for kind in CLASSES}
@@ -243,7 +276,8 @@ def run(cfg):
             "data_sha256": b.data_sha256, "git": config["git"], "gpu": config["gpu"],
             "initial_parameter_sha256": b.initial_hash,
             "final_parameter_sha256": {str(group): tensor_hash(groups.state(group)) for group in groups.ids},
-            "wall_s": time.time() - started, "wall_s_per_round": wall_training / max(1, status["last_completed_round"])}
+            "wall_s": time.perf_counter() - started, "wall_s_per_round": wall_training / max(1, status["last_completed_round"]),
+            "wall_breakdown_s": {key: float(wall.get(key, 0.0)) for key in ("startup", "train", "deliver", "aggregate", "log", "evaluation")}}
         if diverged is not None:
             summary["diverged_round"] = status["diverged_round"] = diverged
         write_json(out / "summary.json", summary)

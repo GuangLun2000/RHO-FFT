@@ -18,14 +18,22 @@ Items (numbers as in the brief):
    the replay tolerance.
 5. Replaying the same reports on two replicas with the same state gives bitwise the same result.
 
-A row is ``{"item", "check", "passed", "detail"}``. Checks restore the parameters they found; items 3 and 4 advance
+A row is ``{"item", "check", "passed", "detail", "worst", "bitwise"}``; the last two are the largest difference the
+check found and whether the compared tensors were bitwise the same (``None`` where that does not apply). Checks restore the parameters they found; items 3 and 4 advance
 the data streams of the satellites they train, so run them on a backend that is not used for a run afterwards.
+
+The first form of the command also runs a diagnostic that is not a pass/fail item (``check_estimator``): how well the
+zeroth-order scalar ``v / mu`` of training follows the exact directional derivative on this model and data, per cut
+and perturbation radius. The brief fixes ``mu = 1e-2`` for the satellite tasks so that the estimate is not
+dominated by bfloat16 rounding (section 1.6); this measures whether that holds on the task at hand.
 """
 import json
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -34,7 +42,7 @@ from ..algorithms import hybrid_step, restore
 from ..batches import ClientStream
 from ..io import write_json
 from ..model import block_index
-from ..randomness import RoundDirections
+from ..randomness import RoundDirections, stable_seed
 from ..replay import ATOL
 from .aggregate import Groups, replay_zeroth_order, round_terms, round_updates, sum_terms
 from .client import train_participation
@@ -68,8 +76,9 @@ def _clear(params):
         param.grad = None
 
 
-def _row(item, check, passed, detail=""):
-    return {"item": item, "check": check, "passed": bool(passed), "detail": detail}
+def _row(item, check, passed, detail="", worst=None, bitwise=None):
+    return {"item": item, "check": check, "passed": bool(passed), "detail": detail, "worst": worst,
+            "bitwise": None if bitwise is None else bool(bitwise)}
 
 
 def check_hybrid_step(b, steps=2):
@@ -90,7 +99,7 @@ def check_hybrid_step(b, steps=2):
                    for (l1, s1, p1), (l2, s2, p2) in zip(*traces))
         worst = max(_max_abs(p1, p2) for (_, _, p1), (_, _, p2) in zip(*traces))
         rows.append(_row(2, f"cut {cut}: the step with the explicit cut is bitwise the step with the derived cut", same,
-                         f"{steps} consecutive steps, largest difference of a parameter {worst:.3g}"))
+                         f"{steps} consecutive steps, largest difference of a parameter {worst:.3g}", worst, same))
     # Cut 0 against plain backpropagation through the whole model.
     restore(b.params, state)
     _clear(b.params)
@@ -104,7 +113,8 @@ def check_hybrid_step(b, steps=2):
     difference, scale = _max_abs(actual, expected), max(float(tensor.abs().max()) for tensor in expected.values())
     rows.append(_row(2, "cut 0: the gradient is the one of plain backpropagation (tolerance 1e-6) and no direction is drawn",
                      difference <= 1e-6 * max(1.0, scale) and scalars == [] and not directions.cache and scale > 0,
-                     f"largest difference {difference:.3g}, largest gradient entry {scale:.3g}, bitwise {_bitwise(actual, expected)}"))
+                     f"largest difference {difference:.3g}, largest gradient entry {scale:.3g}, bitwise {_bitwise(actual, expected)}",
+                     difference, _bitwise(actual, expected)))
     # Cut at the model depth: the blocks move through the zeroth-order path only; a head above them by backpropagation.
     depth, moved, drawn = b.task.depth, {}, {}
     for zo in (True, False):
@@ -152,7 +162,7 @@ def check_upstream_participation(upstream, rounds=(1, 2)):
                      and (candidate.cut, candidate.zo, candidate.direction_master_seed) == (reference.cut, reference.zo, reference.direction_master_seed))
             worst = max(worst, _max_abs(candidate.delta, reference.delta))
         rows.append(_row(3, f"cut {cut}: train_participation is bitwise train_client", same,
-                         f"client {cid}, rounds {list(rounds)}, largest difference of an update {worst:.3g}"))
+                         f"client {cid}, rounds {list(rounds)}, largest difference of an update {worst:.3g}", worst, same))
     restore(upstream.params, state)
     return rows
 
@@ -205,7 +215,7 @@ def check_aggregation(b, server_lr=3.0):
         worst = max((_max_abs(term.zeroth_order, local[term.sid]) for term in terms), default=0.0)
         exact = all(_bitwise(term.zeroth_order, local[term.sid]) for term in terms)
         rows.append(_row(4, f"{label}: replayed zeroth-order terms equal the locally computed ones within {ATOL:g}", worst <= ATOL,
-                         f"largest difference {worst:.3g}, bitwise {exact}, {sum(len(term.zeroth_order) for term in terms)} tensors"))
+                         f"largest difference {worst:.3g}, bitwise {exact}, {sum(len(term.zeroth_order) for term in terms)} tensors", worst, exact))
         lowest = max(report.cut for report in ordered if report.zo) if any(report.zo for report in ordered) else 0
         pure = [name for name in state if block_index(name) >= lowest]
         rows.append(_row(4, f"{label}: tensors that only receive first-order terms end bitwise as after central aggregation",
@@ -213,7 +223,8 @@ def check_aggregation(b, server_lr=3.0):
                          f"{len(pure)} tensors (blocks from {lowest} on" + ("" if pure else "; none in this cohort") + f"), divisor {len(ordered)}"))
         difference = _max_abs(ours, central)
         rows.append(_row(4, f"{label}: the new state equals central aggregate + apply within {ATOL:g}", difference <= ATOL,
-                         f"largest difference {difference:.3g}, bitwise {_bitwise(ours, central)}, server step {server_lr:g}"))
+                         f"largest difference {difference:.3g}, bitwise {_bitwise(ours, central)}, server step {server_lr:g}",
+                         difference, _bitwise(ours, central)))
     restore(b.params, state)
     return rows
 
@@ -227,9 +238,9 @@ def check_replay(b, server_lr=3.0):
     rebuilt = [{sid: replay_zeroth_order(replica, report, b.cfg) for sid, report in reports.items() if report.zo} for replica in replicas]
     again = {sid: replay_zeroth_order(replicas[0], report, b.cfg) for sid, report in reports.items() if report.zo}
     worst = max((max(_max_abs(rebuilt[0][sid], rebuilt[1][sid]), _max_abs(rebuilt[0][sid], again[sid])) for sid in again), default=0.0)
-    rows = [_row(5, "replaying the same reports on two replicas with the same state is bitwise the same",
-                 all(_bitwise(rebuilt[0][sid], rebuilt[1][sid]) for sid in rebuilt[0]) and all(_bitwise(rebuilt[0][sid], again[sid]) for sid in again),
-                 f"{len(rebuilt[0])} reports, also when repeated on one replica; largest difference {worst:.3g}")]
+    same = all(_bitwise(rebuilt[0][sid], rebuilt[1][sid]) for sid in rebuilt[0]) and all(_bitwise(rebuilt[0][sid], again[sid]) for sid in again)
+    rows = [_row(5, "replaying the same reports on two replicas with the same state is bitwise the same", same,
+                 f"{len(rebuilt[0])} reports, also when repeated on one replica; largest difference {worst:.3g}", worst, same)]
     # Two replica groups that start equal stay equal through a round, and can then be joined again.
     groups = Groups(_copy(state), planes=4)
     first, second = groups.split(0, [[0, 1], [2, 3]])
@@ -244,9 +255,73 @@ def check_replay(b, server_lr=3.0):
     rows.append(_row(5, "two replica groups with the same state are bitwise equal after a round; updates do not write in place",
                      equal and untouched and groups.ids == [first] and groups.group_of == [first] * 4,
                      f"{len(reports)} participants, {sum(report.zo for report in reports.values())} with a zeroth-order part; "
-                     f"largest difference between the groups {apart:.3g}"))
+                     f"largest difference between the groups {apart:.3g}", apart, equal))
     restore(b.params, state)
     return rows
+
+
+ESTIMATOR_RADII = (1e-3, 1e-2, 1e-1)
+
+
+def _flat(tensors, names):
+    return torch.cat([tensors[name].detach().double().reshape(-1) for name in names])
+
+
+def check_estimator(b, radii=ESTIMATOR_RADII, directions=32, batches=2):
+    """Diagnostic: the zeroth-order scalars of ``hybrid_step`` against exact directional derivatives.
+
+    For every cut with a forward-only part, ``batches`` training batches and ``directions`` random directions each:
+    ``v / mu`` as training computes it (``hybrid_step`` with an optimizer that does nothing) and ``<gradient, u>``
+    from backpropagation through the whole model. A faithful finite difference gives correlation 1 and slope 1.
+    Too small a radius drowns the activation difference in bfloat16 rounding, too large a one leaves the linear
+    regime; the row of the configured radius is marked. Nothing is trained and no data stream is advanced.
+    """
+    state, rows = _copy(b.params), []
+    examples = b.streams[0].indices
+    for cut in [cut for cut in b.cuts if cut > 0]:
+        prefix = b.bottoms[cut]
+        names = list(prefix)
+        exact, estimates = [], {mu: [] for mu in radii}
+        for step in range(batches):
+            batch = b.batch("train", examples[step * b.cfg.batch_size:(step + 1) * b.cfg.batch_size])
+            restore(b.params, state)
+            _clear(b.params)
+            logits = b.wrapper.forward(batch["input_ids"], batch["attention_mask"], token_ids=b.tokens)[:, -1].float()
+            F.cross_entropy(logits, batch["labels"], reduction="mean").backward()
+            gradient = _flat({name: b.params[name].grad if b.params[name].grad is not None else torch.zeros_like(b.params[name])
+                              for name in names}, names)
+            drawn = RoundDirections(stable_seed("sat-estimator", cut, step))
+            exact += [float(gradient @ _flat(drawn.get(prefix, step, p), names)) for p in range(directions)]
+            for mu in radii:
+                restore(b.params, state)
+                _clear(b.params)
+                _, scalars = hybrid_step(SimpleNamespace(q=directions, mu=mu), b.wrapper, b.params, prefix, batch, b.tokens, _NoStep(),
+                                         drawn, step, cut=cut)
+                estimates[mu] += [float(scalar) / mu for scalar in scalars]
+            drawn.cache.clear()
+        truth = np.array(exact)
+        for mu in radii:
+            estimate = np.array(estimates[mu])
+            finite = bool(np.isfinite(estimate).all())
+            varied = finite and truth.std() > 0 and estimate.std() > 0
+            rows.append({"cut": cut, "mu": mu, "configured": mu == b.cfg.mu, "directions": int(truth.size), "dimension": int(gradient.numel()),
+                         "finite": finite,
+                         "correlation": float(np.corrcoef(estimate, truth)[0, 1]) if varied else None,
+                         "slope": float((estimate * truth).sum() / (truth * truth).sum()) if finite and (truth * truth).sum() > 0 else None,
+                         "sign_agreement": float(np.mean(np.sign(estimate) == np.sign(truth))) if finite else None})
+    restore(b.params, state)
+    _clear(b.params)
+    return rows
+
+
+def render_estimator(rows, configured):
+    show = lambda value: "n/a" if value is None else f"{value:.3f}"  # noqa: E731
+    lines = ["Zeroth-order scalars against exact directional derivatives (diagnostic, not a pass/fail item; 1 and 1 mean the finite "
+             f"difference is exact; the runs use mu = {configured:g}):", "",
+             "| cut | mu | directions | correlation | slope | same sign |", "| --- | --- | --- | --- | --- | --- |"]
+    lines += [f"| {row['cut']} | {row['mu']:g}{' (configured)' if row['configured'] else ''} | {row['directions']} | {show(row['correlation'])} | "
+              f"{show(row['slope'])} | {show(row['sign_agreement'])} |" for row in rows]
+    return "\n".join(lines) + "\n"
 
 
 def render(rows, title):
@@ -285,8 +360,11 @@ def main(argv=None):
     sat = parse_sat_config(argv)
     b = SatBackend(sat)
     rows = check_hybrid_step(b) + check_aggregation(b) + check_replay(b)
+    estimator = check_estimator(b)
+    print(render_estimator(estimator, b.cfg.mu), flush=True)
     return finish(rows, sat.output, f"Self-check of task {sat.task} ({b.task.model}, {b.task.dataset}, {sat.device}{', tiny assets' if sat.tiny else ''})",
-                  {**environment, "task": sat.task, "model": b.task.model, "device": sat.device, "tiny": sat.tiny})
+                  {**environment, "task": sat.task, "model": b.task.model, "device": sat.device, "tiny": sat.tiny, "mu": b.cfg.mu,
+                   "prompt_tokens": b.token_meta, "estimator": estimator})
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@
 > Its end-to-end comparison is suspended (brief v2, header table).
 
 `p2.py` runs experiment E2 of the brief (hypothesis H2, the quorum crossover) and writes a feedback report.
-`notebooks/RHO-FFT_colab.ipynb` drives it on Colab after the baseline regression of `experiments/p0`.
+The notebook drove it on Colab (stage C4) up to commit `80c43db`; the current notebook runs the satellite pipeline only.
 
 ```bash
 python experiments/p2/p2.py base dose feedback --root outputs/p2 --jobs 2 --budget-hours 4

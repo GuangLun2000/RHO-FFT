@@ -35,10 +35,10 @@ When the brief and the code disagree, the code wins; say so in the report.
 | `ho_fl/sat/selfcheck.py`, `calibrate.py` | Correctness checks on a loaded model; GPU memory per cut |
 | `ho_fl/sat/cli.py` | Entry points `ho-fl-sat-*` (`tune`, `topology`, `figures` are placeholders) |
 | `ho_fl/sat/testing.py` | Tiny synthetic assets for CPU tests and `--tiny` dry runs |
-| `experiments/sat/e0/` | Pipeline of gate G0; `expected.json` pins the trace and partition hashes |
+| `experiments/sat/e0/` | Pipeline of gate G0 (`e0.py`) and its feedback report (`digest.py`); `expected.json` pins the trace and partition hashes |
 | `experiments/p0/` | Baseline regression against the upstream commit (still in use) |
 | `tests/sat/` | Tests of the satellite code; `tests/` holds the upstream equivalence tests |
-| `notebooks/RHO-FFT_colab.ipynb` | The only notebook; stage S runs the satellite pipeline |
+| `notebooks/` | The one Colab notebook and `build_notebook.py`, which generates it |
 
 Not written yet (brief section 4.1): `protect.py`, `metrics.py`, `topology.py`, `figures.py`, and the methods beyond
 the four in `methods.py`.
@@ -88,10 +88,28 @@ ho-fl-sat-trace --tables                                 # trace statistics agai
 ```
 
 `pyproject.toml` pins the Colab versions (Python 3.11); a local environment may differ, so name the versions a local
-result was obtained with. The test on the real land mask needs the optional group `sat`.
+result was obtained with. The test on the real land mask needs the optional group `sat`. Colab runs Python 3.11:
+no f-string features of 3.12 (the same quote inside a nested f-string, a backslash inside an expression).
 
-Edit the notebook with a script that loads and rewrites its JSON, then execute its cells once with the external
-effects stubbed; do not hand-edit the `.ipynb`.
+## Colab sessions and the feedback loop
+
+Code, then a Colab session, then the feedback report, then code again (`experiments/sat/README.md`):
+
+- **Planning a session.** List the questions it answers and, for each run, the decision that depends on the answer.
+  Leave out runs nobody would act on. Put cheap checks that can invalidate the rest first and let the pipeline skip
+  what builds on a failed stage (`REQUIRES` in `experiments/sat/e0/e0.py`). Measure cost before spending it: time
+  per participation, round and evaluation is logged by the engine and projected onto the remaining plan.
+- **The report.** A pipeline ends with a report written for the research lead, in Chinese, by rules that are tested
+  without running anything (`experiments/sat/e0/digest.py`): state of the gate, answers, findings (what to fix and in
+  which file, what the lead has to decide, observations), the numbers, the end of failed logs, what to run next.
+- **When the lead pastes a report back.** Save it under `colab_results_feedback/` (local, untracked) with the date,
+  replace the "未运行" entries of the milestone report with its numbers, act on its findings, and adjust pipeline and
+  notebook for the next session.
+- **The notebook.** `notebooks/RHO-FFT_colab.ipynb` is generated: edit `notebooks/build_notebook.py`, run it, and
+  let `tests/sat/test_sat_notebook.py` execute the cells with every external effect stubbed. Never edit the `.ipynb` by
+  hand. The notebook must always reach its last cell: steps record failures instead of raising, and the GPU is
+  released at the end and after any error. Files leave Colab inside cell output (`download_results`), never through
+  `google.colab.files.download`: that one needs an idle kernel, and a cell that then releases the runtime is not.
 
 ## Do not spend tokens on
 
