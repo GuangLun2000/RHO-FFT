@@ -48,9 +48,13 @@ class Colab:
         monkeypatch.setitem(sys.modules, "google", types.ModuleType("google"))
         monkeypatch.setitem(sys.modules, "google.colab", colab)
         # The bundle goes to the browser inside the cell's output: a link, clicked by the page itself when asked to.
-        import IPython.display
-        monkeypatch.setattr(IPython.display, "display", lambda html: self.events.append(
-            ("bundle", "auto" if "a.click();" in html.data else "link", 'download="session3_bundle.zip"' in html.data and "emlw" in html.data)))
+        # IPython is part of Colab's own Python, not of the environment these tests run in, so it is stood in for too.
+        display = types.ModuleType("IPython.display")
+        display.HTML = lambda data: types.SimpleNamespace(data=data)
+        display.display = lambda html: self.events.append(
+            ("bundle", "auto" if "a.click();" in html.data else "link", 'download="session3_bundle.zip"' in html.data and "emlw" in html.data))
+        monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
+        monkeypatch.setitem(sys.modules, "IPython.display", display)
 
     def command(self, command):
         shown = command if isinstance(command, str) else " ".join(str(part) for part in command)

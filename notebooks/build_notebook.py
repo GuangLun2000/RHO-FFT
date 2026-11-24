@@ -447,7 +447,7 @@ md(r'''
 
 code(r'''
 #@title 1 · Baseline regression
-run_stage("1 · Baseline regression: is upstream HO-FL unchanged", ["baseline"], RUN_BASELINE,
+_ = run_stage("1 · Baseline regression: is upstream HO-FL unchanged", ["baseline"], RUN_BASELINE,
           "Three smoke configurations (HO-FL, FedAvg, DeComFL on OPT-125M / SST-2, 3 rounds) on the unchanged upstream commit and on this code, "
           "and ho-fl-replay. The single runs are in the log; the tables show the verdicts.")
 ''')
@@ -462,7 +462,7 @@ md(r'''
 
 code(r'''
 #@title 2 · Tests, trace, data
-run_stage("2 · Tests, trace and data", ["tests", "trace", "data"], RUN_SETUP,
+_ = run_stage("2 · Tests, trace and data", ["tests", "trace", "data"], RUN_SETUP,
           "The CPU test suite in the pinned environment; the 24-hour trace of 120 satellites against appendix A of the brief; "
           "HumAID and EuroSAT with the partitions of seeds 42, 43, 44 in both data variants.")
 ''')
@@ -482,7 +482,7 @@ md(r'''
 
 code(r'''
 #@title 3 · Correctness on the real models
-run_stage("3 · Correctness checks on the real models", ["selfcheck"], RUN_SELFCHECK,
+_ = run_stage("3 · Correctness checks on the real models", ["selfcheck"], RUN_SELFCHECK,
           "Explicit cuts against the derived ones, a participation against upstream train_client, the satellite aggregation against the central "
           "sum divided by the number of participants, the replay of zeroth-order reports on two replicas; then the zeroth-order scalars against "
           "exact directional derivatives (a diagnostic).")
@@ -496,7 +496,7 @@ md(r'''
 
 code(r'''
 #@title 4 · Peak GPU memory per cut
-run_stage("4 · Peak GPU memory of a participation per cut", ["memory"], RUN_MEMORY,
+_ = run_stage("4 · Peak GPU memory of a participation per cut", ["memory"], RUN_MEMORY,
           "Qwen2.5-1.5B at cuts 0, 8, 16, 24, 28 and ViT-B/16 at cuts 0, 3, 6, 9, 12; batch 16.")
 ''')
 
@@ -513,7 +513,7 @@ md(r'''
 
 code(r'''
 #@title 5 · Two simulated hours of every implemented method
-run_stage("5 · Short runs: two simulated hours each", ["smoke"], RUN_SHORT_RUNS,
+_ = run_stage("5 · Short runs: two simulated hours each", ["smoke"], RUN_SHORT_RUNS,
           "The full method on EuroSAT and on HumAID; the ideal centralised, backbone-only and zeroth-order methods on EuroSAT. "
           "Server step 1 everywhere (not tuned), evaluated on the validation split: these accuracies do not compare methods.")
 ''')
@@ -530,7 +530,7 @@ md(r'''
 
 code(r'''
 #@title 6 · A whole simulated day on EuroSAT
-run_stage("6 · Day-long runs on EuroSAT: the full method and the centralised reference", ["pilot"], RUN_DAY_RUNS,
+_ = run_stage("6 · Day-long runs on EuroSAT: the full method and the centralised reference", ["pilot"], RUN_DAY_RUNS,
           "24 simulated hours each, server step 1, validation split. Not a result: it shows whether EuroSAT saturates, what a full run costs "
           "and whether a repeated run reproduces.")
 ''')
@@ -560,7 +560,7 @@ md(r'''
 
 code(r'''
 #@title 7 · HO-FL with and without its zeroth-order part (seeds 43, 44)
-run_stage("7 · HO-FL on AG News with the zeroth-order part on and off", ["t0"], RUN_HOFL_SEEDS,
+_ = run_stage("7 · HO-FL on AG News with the zeroth-order part on and off", ["t0"], RUN_HOFL_SEEDS,
           "Qwen2.5-1.5B, Dirichlet 0.5, beta 0.75, 160 rounds; seeds 43 and 44. Seed 42 is read from the session of 2026-11-21.")
 ''')
 

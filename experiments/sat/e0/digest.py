@@ -335,8 +335,10 @@ def _tests(data, add):
     if tests is None or tests["returncode"] == 0:
         return
     names = "；".join(f"`{entry['id']}`（{entry['message']}）" for entry in (tests.get("failed") or [])[:6])
+    missing = any("ModuleNotFoundError" in entry["message"] for entry in tests.get("failed") or [])
     add("block", "测试", f"CPU 测试有 {tests.get('failures', 0) + tests.get('errors', 0)} 项没有通过：{names or '见第 5 节的日志'}。",
-        "这些测试在本机（版本与 Colab 的固定版本不同）是通过的，多半是 torch / transformers / peft / numpy 版本之间的接口差别；按失败信息修改后重跑。")
+        ("测试用到了 Colab 的固定环境里没有装的包（本机恰好有）：让测试不依赖它，或把它加进 `pyproject.toml` 的依赖。" if missing else
+         "这些测试在本机（版本与 Colab 的固定版本不同）是通过的，多半是 torch / transformers / peft / numpy 版本之间的接口差别；按失败信息修改后重跑。"))
 
 
 def _inputs(data, add):
