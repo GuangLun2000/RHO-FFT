@@ -210,7 +210,8 @@ def test_cut_at_depth_trains_every_block_forward_only_and_the_head_by_backpropag
 
 # --- block_index -----------------------------------------------------------------------------------------------------
 
-def test_block_index_keeps_the_upstream_names_and_reads_vit_names():
+def test_block_index_keeps_the_upstream_names_and_reads_vit_names(monkeypatch):
+    monkeypatch.setattr(model, "HEAD_BLOCK", {})  # the registry is per process: a ViT loaded by another test fills it
     assert block_index("base_model.model.model.layers.27.self_attn.q_proj.lora_A.default.weight") == 27
     assert block_index("base_model.model.model.decoder.layers.11.self_attn.v_proj.lora_B.default.weight") == 11
     assert block_index("base_model.model.vit.encoder.layer.3.attention.attention.query.lora_A.default.weight") == 3

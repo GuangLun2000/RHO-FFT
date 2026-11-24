@@ -29,6 +29,26 @@ first-order quorum, and scarcity-first uplink.
 Milestone reports and the implementation plan are in `docs/reports/` and `docs/plans/` (in Chinese); the reports
 brought back from Colab are kept locally in `colab_results_feedback/` and are not part of the repository.
 
+## Satellite scenario (branch `sat`)
+
+The branch `sat` adds `ho_fl/sat/`: the same hybrid-order fine-tuning on a Walker constellation of 120 satellites
+(per plane one backbone satellite that backpropagates through the whole model, four GPU satellites that
+backpropagate through the top blocks only, five inference-chip satellites that train forward-only) without a ground
+server. Zeroth-order reports are flooded and replayed from seeds on every replica; first-order updates are summed
+along each orbital plane and exchanged between the plane roots over a laser ring. The work follows
+`docs/RHO-FFT-agent-brief-v2.md` milestone by milestone, with one report per milestone in `docs/reports/P-S{n}.md`
+(in Chinese).
+
+| Path | Contents |
+| --- | --- |
+| `ho_fl/sat/` | Trace of the scenario (orbits, eclipse, ground visibility, links), energy model, participation policy, ideal network, replica groups and dual-channel aggregation, the round engine, HumAID and EuroSAT with the two-level partition, the ViT model, self-checks and memory calibration |
+| `experiments/sat/e0/` | Correctness checks, memory calibration and the alignment runs with HO-FL (gate G0) |
+| `tests/sat/` | CPU tests on tiny synthetic assets, including the appendix A values of the brief |
+
+Stage S of the Colab notebook runs `experiments/sat/e0/e0.py` (`REPO_REF = "sat"`, so the branch has to be on GitHub).
+With every new option at its default the existing `ho-fl-*` entry points behave as before; the tests and the baseline
+regression of the notebook check that.
+
 ## Running the experiments on Colab
 
 Open [`notebooks/RHO-FFT_colab.ipynb`](https://colab.research.google.com/github/GuangLun2000/RHO-FFT/blob/main/notebooks/RHO-FFT_colab.ipynb)

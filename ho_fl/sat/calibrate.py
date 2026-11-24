@@ -12,7 +12,6 @@ batch of full length (16 prompts of the task's maximum length, or 16 images) and
 upstream cuts only; it is left as it is. On a device without CUDA the steps run and the memory columns stay empty,
 which is enough for a dry run.
 """
-import argparse
 import gc
 import json
 import sys

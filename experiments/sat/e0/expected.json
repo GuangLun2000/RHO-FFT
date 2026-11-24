@@ -1,0 +1,25 @@
+{
+  "comment": "Hashes recorded on the development machine (macOS, numpy 1.26.4) and quoted in docs/reports/P-S1.md and P-S2.md. The E0 pipeline compares what it builds with them. A trace hash depends on where the land information comes from; a partition hash covers the examples of every satellite and nothing else.",
+  "trace_sha256": {
+    "global_land_mask": "8a0e9cefedc9a821d784a0963610a4433ceb88bf08333464232d0e7fe3b48953",
+    "duty_cycle": "78c2178b6ee5db86fd547717017df030a1ec4579a5372d6c0896bf09acbd9fc4"
+  },
+  "partition_sha256": {
+    "t1-base-s42": "4769c8d7e8f03359c29c744d379f6a3bcecb54f693297ed98a7a45218daae98b",
+    "t1-base-s43": "94895a6edf276c8962d2df4ee2d23bbbb91998fd49bcdf38adbfc6485b654518",
+    "t1-base-s44": "2e593d276c84ec277afe31e77fc3f8cf60dd2da86f41fe396d94567955cb1022",
+    "t1-zonly-s42": "b65bfb2062f69c13ccd667c9ae055c7820488147043d46a02efe41159d71ed84",
+    "t1-zonly-s43": "337a7454d2a9a2f639773a887dfbb333279c0f6c497efb6671b380fadbaffbe4",
+    "t1-zonly-s44": "6bcd15c108a87d0649243c578b532f90eaef78928a1441fde1966711acda25f6",
+    "t2-base-s42": "ff303f60ebcc1ac1aee39d0609a0a703fd2eb6243232a990a0b427833d7a7ade",
+    "t2-base-s43": "c2b151a684c8ab6634e76d70a3b6f73c1f256c4b3bca7e7ced5d2f4dc0f3c9a2",
+    "t2-base-s44": "0af262f425a1821747b0cebd792fa19251c4b71c388f9ce03d0fbe388babd030",
+    "t2-zonly-s42": "9bef918fc3d1420b34d4ff8c3ed4d3920c47ca6f20a1e55a13f5623c51594fd2",
+    "t2-zonly-s43": "361f9b8f22c3a82d8051f072d600cf1103ffad97947059cbd2c8ecd925ab416c",
+    "t2-zonly-s44": "f406f1bab1dff1d65235fbe1aa20fb4f7a42a9f974a726a64428375cd7768066"
+  },
+  "labels_sha256": {
+    "t1": "545a2f7c76667a68e8a797b20462cfdcb2bce85730bbceb354e2b946f7540a64",
+    "t2": "6dc0be863fc39ef7843c2dba87b7c6265aba2b0613c101edcdb82aeb6fab531a"
+  }
+}
