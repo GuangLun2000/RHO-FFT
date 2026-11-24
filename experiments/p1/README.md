@@ -4,8 +4,8 @@
 > `references/v1_1121_qwen.json` is the seed-42 reference of the alignment runs in `experiments/sat/e0/` and
 > `tests/test_grid_and_analysis.py` loads `p1.py`.
 
-`p1.py` runs the experiments of milestone P1 and writes a feedback report; `notebooks/RHO-FFT_colab.ipynb` drives it on
-Colab together with the baseline regression of `experiments/p0/p0.py`.
+`p1.py` runs the experiments of milestone P1 and writes a feedback report. The notebook drove it on Colab (stages C3
+to C8) up to commit `80c43db`; the current notebook runs the satellite pipeline only.
 
 ```bash
 python experiments/p1/p1.py supply --root outputs/p1                       # E1a supply map, CPU, seconds
