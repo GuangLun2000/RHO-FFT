@@ -220,7 +220,8 @@ def stage_tests(ctx):
 def stage_trace(ctx):
     say("== trace ==")
     out = Path(ctx.cache_dir) / "sat" / "traces" / "s1"
-    code, _ = stream(ctx, [ctx.python, "-m", "ho_fl.sat.cli", "trace", "--scenario", "s1", "--output", str(out)], ctx.root / "trace.log", show=quiet)
+    code, _ = stream(ctx, [ctx.python, "-m", "ho_fl.sat.cli", "trace", "--scenario", "s1", "--output", str(out), "--tables"],
+                     ctx.root / "trace.log", show=quiet)
     meta, sanity = harness.read_json(out / "meta.json") or {}, harness.read_json(out / "sanity.json") or {}
     expected = EXPECTED["trace_sha256"].get(meta.get("land_source"))
     record = {"returncode": code, "path": str(out), "trace_sha256": meta.get("trace_sha256"), "land_source": meta.get("land_source"),

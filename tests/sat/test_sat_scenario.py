@@ -162,3 +162,24 @@ def test_trace_command_writes_and_checks(tmp_path, capsys):
     short = tmp_path / "short"
     assert trace_main(["--output", str(short), "--land", "duty_cycle", "--hours", "2"]) == 0
     assert load_trace(short).slots == 240
+
+
+def test_model_tables_state_the_numbers_of_appendix_a(s1, tmp_path, capsys):
+    from ho_fl.sat.cli import model_tables
+
+    tables = model_tables(s1)
+    assert "4277 km 19.75 Mbps" in tables and "550 km 3.035 Gbps" in tables
+    assert "| t1 first-order update, cut 0 | 4358144 | 1.781 |" in tables and "| t2 first-order update, cut 12 | 30760 |" in tables
+    rows = {(cells[1], cells[2]): cells for cells in ([cell.strip() for cell in line.split("|")] for line in tables.splitlines())
+            if len(cells) == 10 and cells[2].isdigit()}
+    assert float(rows["t1", "20"][6]) == 480.0 and float(rows["t1", "11"][6]) == pytest.approx(212.4, rel=0.02)
+    # Qwen at 11 dBi: the idle cut is late from four hops, the next cut is in time, also in eclipse.
+    assert rows["t1", "11"][7].count("LATE") == 2 and "LATE" not in rows["t1", "11"][8] and "LATE" not in rows["t1", "20"][7]
+    # The ViT update is small: nothing is late at 13 or 11 dBi; it takes 8 dBi.
+    assert all("LATE" not in rows["t2", gain][7] and float(rows["t2", gain][6]) == 480.0 for gain in ("20", "13", "11"))
+    assert "LATE" in rows["t2", "8"][7]
+    assert "| t1 | Z | 28 | on | 90.00 / no power | 0.2500 |" in tables and "| t2 | H | 3 | on | 4.50 / 18.00 |" in tables
+    assert "without any training: hybrid satellites 0.850, forward-only satellites 0.875" in tables
+    assert "has power for: hybrid satellites 0.844, forward-only satellites 0.869" in tables
+    assert trace_main(["--output", str(tmp_path / "t"), "--land", "duty_cycle", "--tables"]) == 0
+    assert "Link, timing and energy numbers of the model" in capsys.readouterr().out

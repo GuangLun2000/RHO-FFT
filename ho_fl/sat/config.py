@@ -59,6 +59,10 @@ TASKS = {
     "t1": Task("t1", "text", "qwen", "humaid", 28, (8, 16, 24, 28), 1e-5, 0.04, max_length=192),
     "t2": Task("t2", "vision", "vit", "eurosat", 12, (3, 6, 9, 12), 1e-4, 0.01),
 }
+# Trainable parameters of the real models: (LoRA parameters per block, parameters of the head). A run takes its
+# sizes from the loaded model; these are for tables that are computed without loading one.
+NOMINAL_PARAMETERS = {"t1": (38912, 0), "t2": (24576, 7690)}
+
 # The same tasks on the synthetic assets of ``ho_fl.sat.testing``: 12-block models, so the cut table is T2's.
 TINY_TASKS = {
     "t1": Task("t1", "text", "opt", "humaid", 12, (3, 6, 9, 12), 1e-5, 0.04, max_length=32),
