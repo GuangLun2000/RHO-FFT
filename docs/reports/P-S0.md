@@ -28,8 +28,8 @@
 | 测试 | 结果 | 日志 |
 |---|---|---|
 | 修改前，`main` 上的全部 CPU 测试 | 267 通过，3 个 GPU 测试未选中 | 本次会话的终端输出 |
-| 最终提交 `01aa162` 上，全部 CPU 测试（原有 267 项加 `tests/sat/` 下的 133 项新测试） | **400 通过，0 失败**，3 个 GPU 测试未选中 | `outputs/sat/local/pytest.log` |
-| 基线回归流水线的小模型预演：`experiments/p0/p0.py env golden regress --tiny` | 当前代码与上游原样提交相比，HO-FL、FedAvg、DeComFL 三个冒烟配置都是 `PASS_BITWISE`；`ho-fl-replay` 为 `PASS` | `outputs/sat/local/p0-tiny-regress.log` |
+| 最后一个代码提交 `96b8e16` 上，全部 CPU 测试（原有 267 项加 `tests/sat/` 下的 133 项新测试） | **400 通过，0 失败**，3 个 GPU 测试未选中 | `outputs/sat/local/pytest.log` |
+| 基线回归流水线的小模型预演：`experiments/p0/p0.py env golden regress --tiny`（提交 `01aa162`；此后只改了自检表格的文字） | 当前代码与上游原样提交相比，HO-FL、FedAvg、DeComFL 三个冒烟配置都是 `PASS_BITWISE`；`ho-fl-replay` 为 `PASS` | `outputs/sat/local/p0-tiny-regress.log` |
 
 `tests/sat/test_sat_base.py` 的内容：
 

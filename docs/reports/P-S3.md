@@ -31,11 +31,11 @@
 | `notebooks/RHO-FFT_colab.ipynb` | 新增阶段 S（S1–S6）；第二次会话的阶段保留，默认关闭；`REPO_REF` 改为 `sat` |
 | `tests/sat/test_sat_policy_network.py`、`test_sat_engine.py`、`test_sat_e0a.py`、`test_sat_e0_pipeline.py` | 见第 2 节 |
 
-提交：`30d26b5`、`b5891c6`、`caa692e`、`eced86f`、`01aa162`。
+提交：`30d26b5`、`b5891c6`、`caa692e`、`eced86f`、`01aa162`、`96b8e16`。
 
 ## 2 测试
 
-本机 CPU，日志 `outputs/sat/local/pytest.log`：全部 400 项通过，0 失败（3 个 GPU 测试未选中）。本阶段新增：
+本机 CPU，提交 `96b8e16`，日志 `outputs/sat/local/pytest.log`：全部 400 项通过，0 失败（3 个 GPU 测试未选中）。本阶段新增：
 
 | 测试文件 | 内容 | 结果 |
 |---|---|---|
