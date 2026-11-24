@@ -72,7 +72,8 @@ class Backend:
             return raw.detach(), []
         if cfg.method == "decomfl":
             return decomfl_step(self.estimator, wrapper, batch, tokens, optimizer, directions, e)
-        return hybrid_step(cfg, wrapper, self.params, self.bottoms[self.cuts[cid] if cut is None else cut], batch, tokens, optimizer, directions, e, zo=zo)
+        used = self.cuts[cid] if cut is None else cut  # the cut is known here, so hybrid_step need not derive it
+        return hybrid_step(cfg, wrapper, self.params, self.bottoms[used], batch, tokens, optimizer, directions, e, zo=zo, cut=used)
 
     def evaluate(self, round_id, final):
         cfg = self.cfg

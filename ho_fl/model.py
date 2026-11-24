@@ -41,9 +41,21 @@ def load_model(cfg):
     return peft, wrapper, params, tokenizer, tokens
 
 
+# Trainable tensors outside the transformer blocks (a classification head), registered by the loader that creates
+# them. They count as block ``depth``: above every cut, so they are always in the suffix and trained by backpropagation.
+HEAD_BLOCK = {}
+
+
+def register_head(names, depth):
+    for name in names:
+        HEAD_BLOCK[name] = depth
+
+
 def block_index(name):
-    match = re.search(r"\.layers\.(\d+)\.", name)
-    assert match, name
+    match = re.search(r"\.layers?\.(\d+)\.", name)  # ".layers.N." (causal LMs) or ".layer.N." (ViT)
+    if match is None:
+        assert name in HEAD_BLOCK, name
+        return HEAD_BLOCK[name]
     return int(match.group(1))
 
 
