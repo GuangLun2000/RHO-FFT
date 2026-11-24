@@ -88,7 +88,9 @@ def check_hybrid_step(b, steps=2):
             traces.append(trace)
         same = all(torch.equal(l1, l2) and len(s1) == len(s2) == b.cfg.q and all(torch.equal(x, y) for x, y in zip(s1, s2)) and _bitwise(p1, p2)
                    for (l1, s1, p1), (l2, s2, p2) in zip(*traces))
-        rows.append(_row(2, f"cut {cut}: the step with the explicit cut is bitwise the step with the derived cut", same, f"{steps} consecutive steps"))
+        worst = max(_max_abs(p1, p2) for (_, _, p1), (_, _, p2) in zip(*traces))
+        rows.append(_row(2, f"cut {cut}: the step with the explicit cut is bitwise the step with the derived cut", same,
+                         f"{steps} consecutive steps, largest difference of a parameter {worst:.3g}"))
     # Cut 0 against plain backpropagation through the whole model.
     restore(b.params, state)
     _clear(b.params)
@@ -224,9 +226,10 @@ def check_replay(b, server_lr=3.0):
     replicas = [_copy(state), _copy(state)]
     rebuilt = [{sid: replay_zeroth_order(replica, report, b.cfg) for sid, report in reports.items() if report.zo} for replica in replicas]
     again = {sid: replay_zeroth_order(replicas[0], report, b.cfg) for sid, report in reports.items() if report.zo}
+    worst = max((max(_max_abs(rebuilt[0][sid], rebuilt[1][sid]), _max_abs(rebuilt[0][sid], again[sid])) for sid in again), default=0.0)
     rows = [_row(5, "replaying the same reports on two replicas with the same state is bitwise the same",
                  all(_bitwise(rebuilt[0][sid], rebuilt[1][sid]) for sid in rebuilt[0]) and all(_bitwise(rebuilt[0][sid], again[sid]) for sid in again),
-                 f"{len(rebuilt[0])} reports, also when repeated on one replica")]
+                 f"{len(rebuilt[0])} reports, also when repeated on one replica; largest difference {worst:.3g}")]
     # Two replica groups that start equal stay equal through a round, and can then be joined again.
     groups = Groups(_copy(state), planes=4)
     first, second = groups.split(0, [[0, 1], [2, 3]])
@@ -235,11 +238,13 @@ def check_replay(b, server_lr=3.0):
     updates, _ = round_updates(groups, reports, delivery, b.cfg)
     groups.apply(updates, server_lr)
     equal = _bitwise(groups.state(first), groups.state(second))
+    apart = _max_abs(groups.state(first), groups.state(second))
     untouched = _bitwise(before, state) and before is not groups.state(first)
     groups.merge_identical()
     rows.append(_row(5, "two replica groups with the same state are bitwise equal after a round; updates do not write in place",
                      equal and untouched and groups.ids == [first] and groups.group_of == [first] * 4,
-                     f"{len(reports)} participants, {sum(report.zo for report in reports.values())} with a zeroth-order part"))
+                     f"{len(reports)} participants, {sum(report.zo for report in reports.values())} with a zeroth-order part; "
+                     f"largest difference between the groups {apart:.3g}"))
     restore(b.params, state)
     return rows
 
