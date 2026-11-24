@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 
+from .model import block_index
+
 def optimizer_for(params, cfg, lr=None):
     return torch.optim.AdamW(list(params.values()), lr=cfg.lr if lr is None else lr, betas=tuple(cfg.betas), eps=cfg.eps, weight_decay=cfg.weight_decay, amsgrad=cfg.amsgrad, foreach=cfg.foreach, fused=cfg.fused, maximize=False, capturable=False, differentiable=False)
 
@@ -21,14 +23,17 @@ def perturb(params, snapshot, directions, scale):
     for name, param in params.items():
         param.copy_(snapshot[name]).add_(directions[name], alpha=scale)
 
-def hybrid_step(cfg, wrapper, params, prefix, batch, tokens, optimizer, directions, local_step, *, zo=True):
+def hybrid_step(cfg, wrapper, params, prefix, batch, tokens, optimizer, directions, local_step, *, zo=True, cut=None):
+    # ``cut`` is the first block trained by backpropagation. ``None`` derives it from the prefix as upstream did;
+    # callers that know it pass it, which is what makes an empty prefix (cut 0, every block first-order) possible.
     optimizer.zero_grad(set_to_none=True)
     p_count, mu = (cfg.q, cfg.mu)
     zo_params = prefix
     snapshot = {n: p.detach().clone() for n, p in zo_params.items()}
     accum = {n: torch.zeros_like(p) for n, p in zo_params.items()}
     scalars = []
-    cut = max((int(n.split('.layers.')[1].split('.')[0]) for n in prefix)) + 1
+    if cut is None:
+        cut = max((block_index(n) for n in prefix)) + 1
     with torch.no_grad():
         hidden, context = wrapper.forward_prefix(batch['input_ids'], batch['attention_mask'], cut)
     h_cut = hidden.detach().requires_grad_(True)
@@ -37,7 +42,7 @@ def hybrid_step(cfg, wrapper, params, prefix, batch, tokens, optimizer, directio
     loss.backward()
     lam = h_cut.grad.detach().float()
     assert lam is not None
-    for p in range(p_count if zo else 0):
+    for p in range(p_count if zo and zo_params else 0):  # an empty prefix draws no direction
         u = directions.get(zo_params, local_step, p)
         try:
             with torch.no_grad():

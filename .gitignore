@@ -41,8 +41,8 @@ mirror*
 .DS_Store
 .pytest_cache/
 .ipynb_checkpoints/
-# The HO-FL paper under anonymous review: kept locally, never committed.
+# The HO-FL papers and the rebuttal (under anonymous review): kept locally, never committed.
 33065_HO_FL_Hybrid_Order_Feder.pdf
-docs/RHO-FFT-agent-brief-v1.1.md
-ho_fl_paper/HO-FL_rebuttal.md
+/ho_fl_paper/
 /colab_results_feedback
+/docs

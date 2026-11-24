@@ -27,12 +27,19 @@ ho-fl-memory = "ho_fl.memory:main"
 ho-fl-replay = "ho_fl.replay:main"
 ho-fl-supply = "ho_fl.supply:main"
 ho-fl-analyze = "ho_fl.analysis:main"
+ho-fl-sat-trace = "ho_fl.sat.cli:trace_main"
+ho-fl-sat-train = "ho_fl.sat.cli:train_main"
+ho-fl-sat-tune = "ho_fl.sat.cli:tune_main"
+ho-fl-sat-topology = "ho_fl.sat.cli:topology_main"
+ho-fl-sat-figures = "ho_fl.sat.cli:figures_main"
 
 [tool.setuptools.packages.find]
 include = ["ho_fl*"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4,<10"]
+# Satellite scenario (ho_fl.sat): the land mask decides where a satellite is imaging; Pillow decodes EuroSAT.
+sat = ["global-land-mask==1.0.0", "pillow==11.3.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

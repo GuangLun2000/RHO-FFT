@@ -1,67 +1,77 @@
 # RHO-FFT
 
-**Resilient Hybrid-Order Federated Fine-Tuning.** Research code built on [HO-FL](https://github.com/HKU-WILL-Lab/ho-fl), a
-federated fine-tuning method in which every device trains the layers above its memory cut with backpropagation
-(first-order) and the layers below it with forward-only gradient estimates (zeroth-order). RHO-FFT asks where each
-layer's effective update actually comes from, and how scheduling, aggregation and uplink order should follow from that
-when some devices are unreliable.
+**Hybrid-Order Federated Fine-Tuning over Decentralized Satellite Intelligence.** Research code built on
+[HO-FL](https://github.com/HKU-WILL-Lab/ho-fl), a federated fine-tuning method in which every device trains the layers
+above its memory cut with backpropagation (first-order) and the layers below it with forward-only gradient estimates
+(zeroth-order).
 
-## Research questions
-
-| | Question | Hypotheses |
-| --- | --- | --- |
-| RQ1 (measurement) | Which reports does each layer's update come from? How much do zeroth-order and first-order reports contribute? | H1: zeroth-order reports carry almost no information per step. H1a: the gain of biased sampling comes from less dilution of first-order reports. |
-| RQ2 (resilience) | How does the damage of one unreliable first-order source depend on the first-order supply of its layers? | H2: robust averaging over first-order reports only works from about two honest reports on; below that, order-agnostic robust averaging (zeroth-order reports as ballast) is better. H3: biased sampling and uniform sampling fail in two different ways. |
-| RQ3 (design) | Can supply-aware scheduling, aggregation and uplink order improve efficiency and resilience with the same device resources? | H4: deadlines thin the scarce layers first; sending first-order components bottom-up preserves them. |
-
-The proposed configuration combines a tier quota with rotation, layer-wise robust aggregation that switches on a
-first-order quorum, and scarcity-first uplink.
+The satellite scenario (`ho_fl/sat/`) runs this on a Walker constellation of 120 satellites without a ground server.
+Each orbital plane has one backbone satellite that backpropagates through the whole model, four GPU satellites that
+backpropagate through the top blocks only, and five inference-chip satellites that train forward-only. Zeroth-order
+reports (a seed and ten scalars) are flooded and replayed on every replica; first-order updates are summed along each
+plane and exchanged between the backbone satellites over a laser ring.
 
 ## Status
 
+The work follows `docs/RHO-FFT-agent-brief-v2.md` milestone by milestone; each milestone has a report in
+`docs/reports/P-S{n}.md` (in Chinese). The latest report is the place to look for what has run and what has not.
+
 | Milestone | State |
 | --- | --- |
-| P0: baseline, instrumentation, regression | Done. The instrumented code reproduces upstream bit for bit on the Colab G4 GPU. |
-| P1: measurement (E1a supply map, E1b probes, E1c ablation ladder) | Session 1 done (Qwen2.5-1.5B / AG News, seed 42, 12 runs). Preliminary: switching the zeroth-order updates off changes accuracy by less than 0.2 points; averaging only first-order reports gains 1.8 points, but doubling the server step alone gains 1.7. |
-| P2: faults and resilience (E2 dose-response, E3 end-to-end) | Code for E2 done (counterfactual design). Session 2 is prepared: zeroth-order checks under the HO-FL authors' settings, E2, a numerical check of the estimator, and an E3 pilot. The E3 grid comes next. |
-| P3: deadlines (E4) | Not started. |
-
-Milestone reports and the implementation plan are in `docs/reports/` and `docs/plans/` (in Chinese); the reports
-brought back from Colab are kept locally in `colab_results_feedback/` and are not part of the repository.
-
-## Running the experiments on Colab
-
-Open [`notebooks/RHO-FFT_colab.ipynb`](https://colab.research.google.com/github/GuangLun2000/RHO-FFT/blob/main/notebooks/RHO-FFT_colab.ipynb)
-in Colab, choose a GPU runtime and run all cells. It clones this repository (no token needed), builds the pinned
-environment, runs a CPU dry run and the baseline regression, then the experiments of the session within a time budget,
-and ends with the feedback reports, a downloadable result bundle and the release of the GPU. This is the only notebook
-to run; `notebooks/backup/` keeps those of earlier sessions for the record.
+| P-S0 to P-S3: base changes, trace and links, data and models, engine and four of the eight methods | Code and CPU tests done |
+| Gate G0: correctness checks on the real models, memory calibration, smoke runs, alignment with HO-FL | GPU runs pending (stage S of the Colab notebook) |
+| P-S4 onwards: remaining methods, protection and faults, the experiments, figures | Not started |
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
-| `ho_fl/` | Training code: upstream HO-FL plus scheduling, aggregation (robust statistics, quorum), fault injection, probes, dose-response, supply metrics, the zeroth-order estimator check (`zo_check.py`) and analysis |
-| `experiments/p0/` | Golden values and the baseline regression (invariants I1, I2) |
-| `experiments/p1/` | Measurement pipeline: arms (`arms.json`), session-1 results (`references/`), figures |
-| `experiments/p2/` | Dose-response pipeline (E2) and its figure |
-| `experiments/faults/` | Fault specifications |
-| `notebooks/` | The Colab notebook |
-| `tests/` | CPU tests, including equivalence with the upstream training loop |
+| `ho_fl/sat/` | The satellite scenario: trace (orbits, eclipse, ground visibility, links), energy, participation policy, network, replica groups and dual-channel aggregation, the round engine, HumAID and EuroSAT with the two-level partition, the ViT model, self-checks, memory calibration |
+| `ho_fl/` (other files) | Upstream HO-FL training code, plus the additions of the earlier phase (see below). The satellite code calls into it; existing files change only as listed in the brief, section 4.4 |
+| `experiments/sat/` | One directory per satellite experiment; `e0/` holds the checks and alignment runs of gate G0 |
+| `experiments/p0/` | Baseline regression against the upstream commit, run before every GPU session |
+| `experiments/p1/`, `p2/`, `faults/` | Pipelines of the earlier phase; `p1/references/` holds the seed-42 reference used by `experiments/sat/e0/` |
+| `tests/`, `tests/sat/` | CPU tests on tiny synthetic assets: equivalence with a frozen copy of the upstream training loop, and the satellite code |
+| `notebooks/RHO-FFT_colab.ipynb` | The one notebook to run on Colab |
+| `docs/` | Brief v2, research document v4, storyline (in Chinese, kept locally), and the milestone reports |
+| `CLAUDE.md` | Orientation for coding agents |
+
+Not tracked: `outputs/` (runs and logs), `cache/` (datasets, traces, partitions), `colab_results_feedback/` (results
+brought back from Colab), `ho_fl_paper/`.
+
+## Running the experiments on Colab
+
+Open [`notebooks/RHO-FFT_colab.ipynb`](https://colab.research.google.com/github/GuangLun2000/RHO-FFT/blob/sat/notebooks/RHO-FFT_colab.ipynb)
+in Colab, choose a GPU runtime and run all cells. It clones this repository at the branch named by `REPO_REF` (`sat`,
+so the branch has to be on GitHub; no token needed), builds the pinned environment, runs a CPU dry run and the
+baseline regression, then stage S (`experiments/sat/e0/e0.py`) within a time budget, and ends with the feedback
+reports, a downloadable result bundle and the release of the GPU.
 
 ## Local development
 
 ```bash
 python3 -m pip install uv
 uv venv --python 3.11
-uv pip install --torch-backend cu124 -e ".[dev]"
+uv pip install --torch-backend cu124 -e ".[dev,sat]"
 source .venv/bin/activate
 
-python -m pytest -q                                              # CPU tests (GPU tests: -m gpu)
-python experiments/p0/p0.py env golden regress --tiny            # dry runs on a tiny synthetic model
-python experiments/p1/p1.py queue feedback --tiny --blocks 5,7,4
-python experiments/p2/p2.py all --tiny
+python -m pytest -q                                      # CPU tests (GPU tests: -m gpu)
+python experiments/sat/e0/e0.py all --tiny               # dry run of gate G0 on tiny synthetic models
+python experiments/p0/p0.py env golden regress --tiny    # dry run of the baseline regression
+ho-fl-sat-trace --help                                   # trace of the scenario and its reference tables
+ho-fl-sat-train --help                                   # one satellite run
 ```
+
+## Earlier phase (P0 to P2)
+
+Before the satellite scenario this repository studied where each layer's update comes from in HO-FL and how one
+unreliable device damages it (brief v1.1). That phase added scheduling, robust and quorum aggregation, fault
+injection, probes, the dose-response experiment, supply metrics and the zeroth-order estimator check to `ho_fl/`, all
+off by default. Its findings on Qwen2.5-1.5B / AG News (seed 42) shaped the satellite experiments: switching the
+zeroth-order updates off changes accuracy by less than 0.2 points; averaging only first-order reports gains 1.8
+points, but doubling the server step alone gains 1.7. Its deadline milestone (P3) is replaced by the satellite
+scenario, and its end-to-end resilience comparison is suspended. The documents of that phase were removed from the
+working tree; they are in the git history of `main` (`docs/plans/`, `docs/reports/P0.md` to `P2.md`).
 
 ## Relation to HO-FL
 

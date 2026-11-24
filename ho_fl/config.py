@@ -66,6 +66,7 @@ class Config:
     attribution_every: int = 0
     dose_probe: bool = False
     probe_val_examples: int = 1024
+    scenario: str = ""  # satellite scenario (ho_fl.sat); empty for the upstream setting of 30 devices in three tiers
 
     @property
     def betas(self):
@@ -126,7 +127,7 @@ class Config:
             raise ValueError("Unsupported method")
         if self.partition not in {"iid", "dirichlet_1", "dirichlet_05", "dirichlet_01"} or (self.dataset != "ag_news" and self.partition != "iid"):
             raise ValueError("Only AG News supports non-IID partitions")
-        if self.n != 30 or not 1 <= self.k <= self.n or min(self.E, self.q, self.batch_size, self.rounds) < 1:
+        if (self.n != 30 and not self.scenario) or not 1 <= self.k <= self.n or min(self.E, self.q, self.batch_size, self.rounds) < 1:
             raise ValueError("Three resource tiers require N=30; counts must be positive")
         if not 0 <= self.beta <= 1 or self.mu <= 0 or self.lr <= 0:
             raise ValueError("Invalid beta, smoothing radius, or learning rate")

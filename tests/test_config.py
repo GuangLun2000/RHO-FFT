@@ -19,7 +19,8 @@ NEW_DEFAULTS = {"save_state_rounds": "", "init_state": "", "zo_mode": "on", "ser
                 "agg_weight": "cohort", "fo_quorum": 1, "thin_policy": "all", "tier_quota": "", "in_tier": "rotate",
                 "rotate_window": 20, "layer_stats": False, "probe_rounds": "", "agg_stat": "mean", "agg_unit": "layer",
                 "norm_clip": 0.0, "schedule_file": "", "fault_spec": "", "on_nonfinite": "raise", "per_class_eval": False,
-                "uniform_cut": 0, "eval_initial": True, "attribution_every": 0, "dose_probe": False, "probe_val_examples": 1024}
+                "uniform_cut": 0, "eval_initial": True, "attribution_every": 0, "dose_probe": False, "probe_val_examples": 1024,
+                "scenario": ""}
 
 
 def test_defaults_are_the_upstream_defaults_plus_registered_new_fields():
