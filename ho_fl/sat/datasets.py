@@ -153,7 +153,11 @@ def load_humaid_tokens(cache_dir, data, tokenizer, model, max_length, tiny=False
                       "prompt": humaid_prompt("{text}", data["classes"]), "truncation_side": tokenizer.truncation_side,
                       "longest": max(len(ids) for split in SPLITS for ids in tokens[split]["input_ids"]),
                       "truncated": sum(len(ids) >= max_length for split in SPLITS for ids in tokens[split]["input_ids"])}
-    write_json(path, tokens)
+    # Written compactly: with one token per line, as write_json would, the file is three times as large.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(tokens, sort_keys=True, allow_nan=False))
+    temporary.replace(path)
     return tokens
 
 

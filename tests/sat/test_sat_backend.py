@@ -1,5 +1,6 @@
 """The backend of a satellite run: sizes, the local step, evaluation, and the memory calibration dry run."""
 import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -114,3 +115,29 @@ def test_data_command_prints_the_partition(assets, capsys):
     assert data_main([*arguments, "--tiny", "--variant", "zonly"]) == 0
     printed = capsys.readouterr().out
     assert "variant zonly" in printed and "partition sha256" in printed and "held out for the forward-only satellites" in printed
+
+
+def test_humaid_tokens_keep_the_options_and_are_cached(backends, assets):
+    from ho_fl.sat.datasets import humaid_prompt, load_humaid_tokens, load_task_data, tokenize_humaid
+
+    b = backends["t1"]
+    cfg = SatConfig(**assets["t1"]).resolve()
+    raw = load_task_data(cfg)
+    limit = b.task.max_length
+    assert max(len(ids) for split in ("train", "validation", "test") for ids in b.data[split]["input_ids"]) <= limit
+    assert b.data["train"]["labels"] == raw["train"]["labels"] and len(b.data["test"]["input_ids"]) == 360
+    # A tweet that is too long loses its beginning; the options at the end, which the answer depends on, stay.
+    options = b.tokenizer(humaid_prompt("", raw["classes"]), add_special_tokens=False)["input_ids"][-12:]
+    long = {**raw, "train": {"text": ["w20 " * 200 + "w21", "w30"], "labels": [0, 1], "events": [0, 0]},
+            "validation": raw["validation"], "test": raw["test"]}
+    tokens = tokenize_humaid(long, b.tokenizer, limit)["train"]["input_ids"]
+    assert len(tokens[0]) == limit and tokens[0][-12:] == tokens[1][-12:] == options and len(tokens[1]) < limit
+    path = Path(cfg.cache_dir) / "sat" / "tokens" / f"humaid-tiny-opt-len{limit}.json"
+    cached = json.loads(path.read_text())
+    assert cached["meta"]["data_sha256"] == raw["meta"]["sha256"] and cached["meta"]["truncation_side"] == "left"
+    assert cached["meta"]["longest"] <= limit and cached["train"]["input_ids"] == b.data["train"]["input_ids"]
+    before = path.stat().st_mtime_ns
+    again = load_humaid_tokens(cfg.cache_dir, raw, b.tokenizer, b.task.model, limit, tiny=True)
+    assert path.stat().st_mtime_ns == before and again["train"]["input_ids"] == b.data["train"]["input_ids"]
+    other = load_humaid_tokens(cfg.cache_dir, {**raw, "meta": {**raw["meta"], "sha256": "changed"}}, b.tokenizer, b.task.model, limit, tiny=True)
+    assert other["meta"]["data_sha256"] == "changed" and path.stat().st_mtime_ns != before  # rebuilt for other data
