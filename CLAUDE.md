@@ -35,7 +35,7 @@ When the brief and the code disagree, the code wins; say so in the report.
 | `ho_fl/sat/selfcheck.py`, `calibrate.py` | Correctness checks on a loaded model; GPU memory per cut |
 | `ho_fl/sat/cli.py` | Entry points `ho-fl-sat-*` (`tune`, `topology`, `figures` are placeholders) |
 | `ho_fl/sat/testing.py` | Tiny synthetic assets for CPU tests and `--tiny` dry runs |
-| `experiments/sat/e0/` | Pipeline of gate G0 (`e0.py`) and its feedback report (`digest.py`); `expected.json` pins the trace and partition hashes |
+| `experiments/sat/e0/` | Pipeline of gate G0 (`e0.py`), its feedback report (`digest.py`) and the figures of a session (`plots.py`); `expected.json` pins the trace and partition hashes |
 | `experiments/p0/` | Baseline regression against the upstream commit (still in use) |
 | `tests/sat/` | Tests of the satellite code; `tests/` holds the upstream equivalence tests |
 | `notebooks/` | The one Colab notebook and `build_notebook.py`, which generates it |
@@ -107,18 +107,29 @@ Code, then a Colab session, then the feedback report, then code again (`experime
 - **The report.** A pipeline ends with a report written for the research lead, in Chinese, by rules that are tested
   without running anything (`experiments/sat/e0/digest.py`): state of the gate, answers, findings (what to fix and in
   which file, what the lead has to decide, observations), the numbers, the end of failed logs, what to run next.
-- **When the lead pastes a report back.** Save it under `colab_results_feedback/` (local, untracked) with the date,
-  replace the "未运行" entries of the milestone report with its numbers, act on its findings, and adjust pipeline and
-  notebook for the next session.
+- **When the lead pastes a report back.** Save it under `colab_results_feedback/` (local, untracked; the lead keeps
+  the sessions of the satellite phase in its folder `2_testing_results/`) with the date, replace the "未运行" entries
+  of the milestone report with its numbers, act on its findings, and adjust pipeline and notebook for the next session.
 - **What a session prints.** The lead follows a session on the Colab page, so the page has to say where it is at
   any moment: every stage states what it is about to do and how long it took, a training run prints a line per
   round with the time left, and a command that is silent for 30 seconds gets a line from the pipeline (`stream` in
   `e0.py`). Conclusions and progress go to the page; tracebacks and tables of passing checks go to the logs.
 - **The notebook.** `notebooks/RHO-FFT_colab.ipynb` is generated: edit `notebooks/build_notebook.py`, run it, and
   let `tests/sat/test_sat_notebook.py` execute the cells with every external effect stubbed. Never edit the `.ipynb` by
-  hand. The notebook must always reach its last cell: steps record failures instead of raising, and the GPU is
-  released at the end and after any error. Files leave Colab inside cell output (`download_results`), never through
-  `google.colab.files.download`: that one needs an idle kernel, and a cell that then releases the runtime is not.
+  hand. It is organised the way the lead's other Colab notebooks are: numbered steps, each a Markdown heading and its
+  code (Step 0 code, 1 dependencies, 2 files and GPU, 3 the experiment, 4 summary and figures in the page, 5 the
+  feedback report, 6 the result bundle, 7 release of the GPU), with no forms and no switches: what a session runs
+  is decided by the code it clones. The experiment must always reach Step 7: its steps record failures instead of
+  raising, and an error in any other cell prints the report and releases the GPU. Files leave Colab inside cell
+  output (`offer_bundle`), never through `google.colab.files.download`: that one needs an idle kernel, and a session
+  that then releases the runtime is not.
+- **No time budget.** By decision of the lead (2026-11-25) the notebook limits nothing in time: no run is skipped or
+  stopped for taking long. The pipeline keeps `--budget-hours` and `--deadline` for a caller who wants them; without
+  them it sets no time-out. Say what a session is expected to cost instead of capping it.
+- **Figures.** `experiments/sat/e0/plots.py` draws them from `feedback/feedback_E0.json` in the notebook's own
+  Python, which has matplotlib; the pinned environment of the pipeline does not, so that file imports matplotlib and
+  the standard library only, and a test that needs matplotlib skips without it. A method keeps its colour in every
+  figure; words inside a figure are English (Colab's fonts have no Chinese glyphs).
 
 ## Do not spend tokens on
 
