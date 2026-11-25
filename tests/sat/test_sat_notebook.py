@@ -19,7 +19,7 @@ spec = importlib.util.spec_from_file_location("build_notebook", REPO / "notebook
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
-ALL_STAGES = [["env"], ["baseline"], ["tests", "trace", "data"], ["selfcheck"], ["memory"], ["smoke"], ["pilot"], ["feedback"], ["t0"], ["feedback"]]
+ALL_STAGES = [["env"], ["baseline", "tests", "trace", "data"], ["selfcheck"], ["memory"], ["smoke"], ["pilot"], ["feedback"]]
 
 
 class FakeProcess:
@@ -48,9 +48,13 @@ class Colab:
         monkeypatch.setitem(sys.modules, "google", types.ModuleType("google"))
         monkeypatch.setitem(sys.modules, "google.colab", colab)
         # The bundle goes to the browser inside the cell's output: a link, clicked by the page itself when asked to.
-        import IPython.display
-        monkeypatch.setattr(IPython.display, "display", lambda html: self.events.append(
-            ("bundle", "auto" if "a.click();" in html.data else "link", 'download="session3_bundle.zip"' in html.data and "emlw" in html.data)))
+        # IPython is part of Colab's own Python, not of the environment these tests run in, so it is stood in for too.
+        display = types.ModuleType("IPython.display")
+        display.HTML = lambda data: types.SimpleNamespace(data=data)
+        display.display = lambda html: self.events.append(
+            ("bundle", "auto" if "a.click();" in html.data else "link", 'download="session_bundle.zip"' in html.data and "emlw" in html.data))
+        monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
+        monkeypatch.setitem(sys.modules, "IPython.display", display)
 
     def command(self, command):
         shown = command if isinstance(command, str) else " ".join(str(part) for part in command)
@@ -90,44 +94,41 @@ def test_the_notebook_on_disk_is_the_generated_one():
     notebook = json.loads(builder.NOTEBOOK.read_text(encoding="utf-8"))
     assert notebook["nbformat"] == 4 and notebook["metadata"]["accelerator"] == "GPU" and builder.main(["--check"]) == 0
     kinds = [cell["cell_type"] for cell in notebook["cells"]]
-    assert kinds[0] == "markdown" and kinds.count("code") == 15
+    assert kinds[0] == "markdown" and kinds.count("code") == 11
     for index, cell in enumerate(notebook["cells"]):
         if cell["cell_type"] == "code":
             compile("".join(cell["source"]), f"cell {index}", "exec")
             assert cell["outputs"] == [] and cell["execution_count"] is None
     titles = ["".join(cell["source"]).splitlines()[0] for cell in notebook["cells"] if cell["cell_type"] == "code"]
     assert all(title.startswith("#@title ") for title in titles) and titles[-1].startswith("#@title Feedback")
-    # The overview names the seven questions and the Markdown cells explain the feedback and what to bring back.
-    text = "\n".join("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "markdown")
-    assert "这次会话要回答的七个问题" in text and "## 反馈：这次实验说明了什么，代码该怎么改" in text and "带回来的内容" in text
+    # Only the satellite session: five numbered steps, nothing of the HO-FL replication, no Colab download call.
+    assert [title.split()[1] for title in titles if title.split()[1].isdigit()] == list("12345")
+    text = builder.text()
+    assert "e0.py\", \"t0" not in text and '"t0"' not in text and "google.colab import files" not in text
+    markdown = "\n".join("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "markdown")
+    assert "## 这次要回答的问题" in markdown and "## 反馈：这次实验说明了什么，代码该怎么改" in markdown
 
 
 def test_a_session_runs_the_stages_in_order_and_ends_with_feedback_and_release(tmp_path, monkeypatch, capsys):
     colab = Colab(tmp_path, monkeypatch)
     namespace = colab.run_all()
     assert colab.stages() == ALL_STAGES
-    # The record of the environment and the dry run come before any stage on the GPU; every stage call carries the deadline of the session.
+    # The record of the environment and the dry run come before the steps; every step carries the deadline of the session.
     order = [index for index, shown in enumerate(colab.commands) if "e0.py" in shown]
-    assert "e0.py env" in colab.commands[order[0]] and "all --tiny --quiet" in colab.commands[order[1]] and "e0.py baseline" in colab.commands[order[2]]
-    budgeted = [shown for shown in colab.commands if "e0.py" in shown and any(f"e0.py {name}" in shown for name in ("baseline", "tests", "smoke", "pilot", "t0"))]
-    assert len(budgeted) == 5 and all(f"--deadline {namespace['DEADLINE'] - 300}" in shown and "--force" not in shown for shown in budgeted)
+    assert "e0.py env" in colab.commands[order[0]] and "all --tiny --quiet" in colab.commands[order[1]] and "e0.py baseline tests trace data" in colab.commands[order[2]]
+    steps = [shown for shown in colab.commands if "e0.py" in shown and "--tiny" not in shown and "e0.py env" not in shown and "e0.py feedback" not in shown]
+    assert len(steps) == 5 and all(f"--deadline {namespace['DEADLINE'] - 300}" in shown and "--force" not in shown for shown in steps)
     assert all("--cache-dir" in shown and "--device cuda" in shown for shown in colab.commands if "e0.py" in shown and "--tiny" not in shown)
-    # The report is printed twice (before the long HO-FL runs and at the end), each time with a download; then the GPU goes back.
-    # (the bytes b"zip" of the stand-in bundle are "emlw" in base64: they travel in the output, no request goes back to the runtime)
-    assert colab.events == [("bundle", "link", True), ("bundle", "auto", True), "release"]
+    # One report between the marker lines, the bundle inside the output (the bytes b"zip" are "emlw" in base64), then the GPU goes back.
+    assert colab.events == [("bundle", "auto", True), "release"]
     printed = capsys.readouterr().out
-    assert printed.count("反馈报告：从下一行开始复制") == 2 and printed.count("# 报告正文") == 2 and printed.count("反馈报告：复制到上一行为止") == 2
-    assert printed.index("# 7 · HO-FL") > printed.index("# Feedback so far") and printed.rindex("# 报告正文") > printed.index("# 7 · HO-FL")
-    # The interim report is told that the HO-FL runs are still to come; the final one is not.
-    reports = [shown for shown in colab.commands if "e0.py feedback" in shown]
-    assert ["--pending t0" in shown for shown in reports] == [True, False] and all("--quiet" in shown for shown in reports)
-    assert "| step | question | what the answer decides | time | this session |" in printed and "Releasing the GPU runtime in 15 seconds" in printed
-    assert "google.colab import files" not in builder.text()   # that download needs an idle kernel, which this notebook never offers
-    steps = [title for title in namespace["STATUS"] if title[0].isdigit()]
-    assert [title[0] for title in steps] == list("1234567") and all(namespace["STATUS"][title] == "ok" for title in steps)
+    assert printed.count("反馈报告：从下一行开始复制") == 1 and printed.count("# 报告正文") == 1 and printed.count("反馈报告：复制到上一行为止") == 1
+    assert "Releasing the GPU runtime in 15 seconds" in printed and "\nTrue\n" not in printed
+    titles = [title for title in namespace["STATUS"] if title[0].isdigit()]
+    assert [title[0] for title in titles] == list("12345") and all(namespace["STATUS"][title] == "ok" for title in titles)
     session = json.loads((colab.root / "work" / "sat" / "session.json").read_text())
     assert [step["name"] for step in session["steps"]] == ["code", "environment", "dry_run"] and all(step["gpu"] is False for step in session["steps"])
-    assert session["budget_hours"] == 2.5 and session["repo_ref"] == "sat" and len(colab.handlers) == 1
+    assert session["budget_hours"] == 1.5 and session["repo_ref"] == "sat" and len(colab.handlers) == 1
 
 
 def test_a_failing_stage_does_not_stop_the_session(tmp_path, monkeypatch, capsys):
@@ -136,23 +137,23 @@ def test_a_failing_stage_does_not_stop_the_session(tmp_path, monkeypatch, capsys
     # The notebook goes on: the pipeline itself skips what builds on the failed stage, and says so in the report.
     assert colab.stages() == ALL_STAGES and colab.events[-1] == "release"
     status = {title[0]: state for title, state in namespace["STATUS"].items() if title[0].isdigit()}
-    assert status["3"].startswith("ATTENTION") and status["4"] == "ok"
-    assert "3 · Correctness checks on the real models: ATTENTION" in capsys.readouterr().out
+    assert status["2"].startswith("ATTENTION") and status["3"] == "ok"
+    assert "2 · Correctness checks on the real models: ATTENTION" in capsys.readouterr().out
 
 
 def test_switches_and_the_budget_decide_what_is_called(tmp_path, monkeypatch, capsys):
-    colab = Colab(tmp_path, monkeypatch, RUN_HOFL_SEEDS=False, RUN_MEMORY=False, RUN_DRY_RUN=False, FORCE=True, DOWNLOAD_BUNDLE=False, RELEASE_GPU=False)
+    colab = Colab(tmp_path, monkeypatch, RUN_MEMORY=False, RUN_DRY_RUN=False, FORCE=True, DOWNLOAD_BUNDLE=False, RELEASE_GPU=False)
     namespace = colab.run_all()
-    assert colab.stages() == [["env"], ["baseline"], ["tests", "trace", "data"], ["selfcheck"], ["smoke"], ["pilot"], ["feedback"]]
+    assert colab.stages() == [["env"], ["baseline", "tests", "trace", "data"], ["selfcheck"], ["smoke"], ["pilot"], ["feedback"]]
     assert not any("--tiny" in shown for shown in colab.commands) and colab.events == []
     assert all("--force" in shown for shown in colab.commands if "e0.py smoke" in shown)
     printed = capsys.readouterr().out
-    assert printed.count("反馈报告：从下一行开始复制") == 1 and "RELEASE_GPU is off" in printed and "NOT available" in printed
-    assert namespace["STATUS"]["4 · Peak GPU memory of a participation per cut"] == "switched off"
+    assert printed.count("反馈报告：从下一行开始复制") == 1 and "RELEASE_GPU is off" in printed and "result bundle: not available" in printed
+    assert namespace["STATUS"]["3 · Peak GPU memory of a participation per cut"] == "switched off"
     # A budget that is used up: nothing new starts, the feedback is still written and the GPU released.
     spent = Colab(tmp_path / "spent", monkeypatch, BUDGET_HOURS=0.0, RUN_DRY_RUN=False)
     namespace = spent.run_all()
-    assert spent.stages() == [["env"], ["feedback"], ["feedback"]] and spent.events[-1] == "release"
+    assert spent.stages() == [["env"], ["feedback"]] and spent.events[-1] == "release"
     assert {state for title, state in namespace["STATUS"].items() if title[0].isdigit()} == {"skipped (no budget left)"}
 
 

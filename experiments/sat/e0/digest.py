@@ -6,7 +6,7 @@ lead copies back from Colab. It only reads that dictionary, so it can be tested 
 The report is written in Chinese, like the milestone reports (brief v2, section 12): it is read by the research
 lead on the Colab page. Its parts:
 
-    1  the state of gate G0 and short answers to the seven questions the session was run for
+    1  the state of gate G0 and short answers to the six questions the session was run for
     2  the checklist of gate G0 (brief v2, section 10.1, E0-a)
     3  findings: what has to be fixed, what the research lead has to decide, what is worth knowing
     4  the numbers behind them
@@ -41,8 +41,8 @@ STAGES = {"env": "环境记录", "baseline": "基线回归", "tests": "CPU 测�
           "selfcheck": "正确性检查", "memory": "显存标定", "smoke": "短程运行", "pilot": "一整天的运行",
           "t0": "HO-FL 零阶开关", "feedback": "反馈报告"}
 STEPS = {"code": "取代码", "environment": "建环境", "dry_run": "预演（CPU）"}   # steps of the notebook itself
-SWITCHES = {"baseline": "RUN_BASELINE", "tests": "RUN_SETUP", "trace": "RUN_SETUP", "data": "RUN_SETUP", "selfcheck": "RUN_SELFCHECK",
-            "memory": "RUN_MEMORY", "smoke": "RUN_SHORT_RUNS", "pilot": "RUN_DAY_RUNS", "t0": "RUN_HOFL_SEEDS"}
+SWITCHES = {"baseline": "RUN_CHECKS", "tests": "RUN_CHECKS", "trace": "RUN_CHECKS", "data": "RUN_CHECKS", "selfcheck": "RUN_SELFCHECK",
+            "memory": "RUN_MEMORY", "smoke": "RUN_SHORT_RUNS", "pilot": "RUN_DAY_RUNS"}   # the switches of the notebook
 REASONS = {"memory": "显存", "eclipse": "地影", "energy": "电量", "unreachable": "不可达"}
 WHERE = {2: "`ho_fl/algorithms.py` 的 `hybrid_step`（显式给出分界的路径）",
          3: "`ho_fl/sat/client.py` 的 `train_participation`",
@@ -230,8 +230,10 @@ def checklist(data):
         rows.append(("1", "基线回归：默认设置下与上游 HO-FL 结果一致，重放通过", "NOT RUN", "未运行" if baseline is None else "没有跑完，见第 5 节"))
     else:
         verdicts = "，".join(f"{name} {entry['verdict']}" for name, entry in sorted(baseline["configs"].items()))
+        reused = baseline.get("reused")
         rows.append(("1", "基线回归：默认设置下与上游 HO-FL 结果一致，重放通过", verdict(baseline["status"] == "PASSED"),
-                     f"{verdicts}；重放 {baseline['replay']['verdict']}" + ("；需要研究负责人判定" if baseline["status"] == "INCONCLUSIVE" else "")))
+                     f"{verdicts}；重放 {baseline['replay']['verdict']}" + ("；需要研究负责人判定" if baseline["status"] == "INCONCLUSIVE" else "")
+                     + (f"（{reused['date']} 在提交 {reused['commit'][:7]} 上通过；此后 HO-FL 的代码没有改动，本次不重跑）" if reused else "")))
     items = {"2": "显式给出分界的本地训练一步：与原推导逐位相同；分界 0 等于全反向传播；分界在最高层时各层只靠零阶",
              "3": "卫星侧一次参与与上游 `train_client` 逐位相同",
              "4": "理想网络下，卫星聚合等于中心化的“求和后除以人数”（一阶逐位相同，零阶相差不超过 1e-7）",
@@ -312,8 +314,10 @@ def _baseline(data, add):
         return
     if baseline["status"] == "PASSED":
         mode = "逐位相同" if all(entry["verdict"] == "PASS_BITWISE" for entry in baseline["configs"].values()) else "在容差内相同"
+        reused = baseline.get("reused")
         add("good", "基线", f"HO-FL、FedAvg、DeComFL 三个冒烟配置在当前代码与上游提交上{mode}，重放通过"
-                            f"（{baseline['replay'].get('comparisons', '?')} 项比较，最大误差 {small(baseline['replay'].get('max_abs_error'))}）。")
+                            f"（{baseline['replay'].get('comparisons', '?')} 项比较，最大误差 {small(baseline['replay'].get('max_abs_error'))}）。"
+                            + (f"这是 {reused['date']} 在同一块 GPU、同一版 PyTorch 上的结果；HO-FL 的代码此后没有改动，所以没有重跑。" if reused else ""))
         return
     for name, entry in sorted(baseline["configs"].items()):
         if entry["verdict"] in ("FAIL", "RUN_FAILED"):
@@ -335,8 +339,10 @@ def _tests(data, add):
     if tests is None or tests["returncode"] == 0:
         return
     names = "；".join(f"`{entry['id']}`（{entry['message']}）" for entry in (tests.get("failed") or [])[:6])
+    missing = any("ModuleNotFoundError" in entry["message"] for entry in tests.get("failed") or [])
     add("block", "测试", f"CPU 测试有 {tests.get('failures', 0) + tests.get('errors', 0)} 项没有通过：{names or '见第 5 节的日志'}。",
-        "这些测试在本机（版本与 Colab 的固定版本不同）是通过的，多半是 torch / transformers / peft / numpy 版本之间的接口差别；按失败信息修改后重跑。")
+        ("测试用到了 Colab 的固定环境里没有装的包（本机恰好有）：让测试不依赖它，或把它加进 `pyproject.toml` 的依赖。" if missing else
+         "这些测试在本机（版本与 Colab 的固定版本不同）是通过的，多半是 torch / transformers / peft / numpy 版本之间的接口差别；按失败信息修改后重跑。"))
 
 
 def _inputs(data, add):
@@ -548,7 +554,7 @@ def _session(data, add):
 # --- the seven questions ------------------------------------------------------------------------------------------------
 
 def answers(data, rows):
-    """``(question, answer)`` for the seven questions of the session, each in a sentence or two; the findings of
+    """``(question, answer)`` for the questions of the session, each in a sentence or two; the findings of
     section 3 carry the details. "未运行" where nothing was measured."""
     verdicts = {}
     for row in rows:
@@ -606,12 +612,14 @@ def answers(data, rows):
         sixth = f"理想中心化第 {day['hours']:g} 小时的验证准确率是 {pct(day['ideal'], 1)}%" + (f"，完整方法 {pct(day['full'], 1)}%" if day["full"] is not None else "") + "。"
         sixth += (f"第 {day['saturated_at']:g} 小时就到了 {100 * SATURATION:.0f}%：偏简单，见第 3.2 节。" if day["saturated_at"] is not None
                   else f"步长未调时没有到 {100 * SATURATION:.0f}%，是否太简单等选完步长再看。")
+    result = [("原有的 HO-FL 有没有被改坏？", first), ("卫星部分的代码在真实模型上对不对？", second), ("每个分界要多少显存？", " ".join(memory) or "未运行。"),
+              ("一次运行要多久，后面的实验要多少 GPU 小时？", " ".join(cost) or "未运行。"), ("模型在学吗，零阶估计可信吗？", " ".join(learning) or "未运行。"),
+              ("EuroSAT 会不会太简单，24 小时的时长合适吗？", sixth)]
     hofl = hofl_facts(data)
-    seventh = (("还没有开始，见会话最后的完整报告。" if "t0" in (data.get("pending") or []) else "未运行或种子不够。") if hofl is None else
-               f"{len(hofl['gaps'])} 个种子上，保留零阶比关掉高 {hofl['mean']:+.2f} 个点（标准差 {hofl['sd']:.2f}）；作者报告 {AUTHORS_ZO_GAP} 个点。")
-    return [("原有的 HO-FL 有没有被改坏？", first), ("卫星部分的代码在真实模型上对不对？", second), ("每个分界要多少显存？", " ".join(memory) or "未运行。"),
-            ("一次运行要多久，后面的实验要多少 GPU 小时？", " ".join(cost) or "未运行。"), ("模型在学吗，零阶估计可信吗？", " ".join(learning) or "未运行。"),
-            ("EuroSAT 会不会太简单，24 小时的时长合适吗？", sixth), ("HO-FL 里零阶到底有多大作用？", seventh)]
+    if hofl is not None:   # only when the HO-FL runs of E0-b were part of this session
+        result.append(("HO-FL 里零阶到底有多大作用？", f"{len(hofl['gaps'])} 个种子上，保留零阶比关掉高 {hofl['mean']:+.2f} 个点（标准差 {hofl['sd']:.2f}）；"
+                                                       f"作者报告 {AUTHORS_ZO_GAP} 个点。"))
+    return result
 
 
 # --- the report ---------------------------------------------------------------------------------------------------------
@@ -622,7 +630,7 @@ def next_steps(data, rows, found):
     lines = []
     decisions = sum(finding["level"] == "decide" for finding in found)
     if state == "PASS":
-        lines.append("关卡 G0 的七项都通过了。接下来不需要 GPU：写另外四种方法（经地面服务器、邻居平均、按节点混合、固定分界的静态版本）、"
+        lines.append("关卡 G0 的七项检查都通过了。接下来不需要 GPU：写另外四种方法（经地面服务器、邻居平均、按节点混合、固定分界的静态版本）、"
                      "保护措施与故障注入、指标汇总。下一次会话在 EuroSAT 上对全部方法做冒烟并选服务器步长。")
         if decisions:
             lines.append(f"开始前请先定第 3.2 节的 {decisions} 件事，它们会改变后面实验的设计。")
@@ -632,11 +640,11 @@ def next_steps(data, rows, found):
         reasons = [f"{STAGES.get(name, name)}（{why(entry)}）" for name, entry in stages.items() if entry.get("status") == "skipped"]
         lines.append(f"清单第 {'、'.join(items)} 项还没有结果" + (f"：{'；'.join(reasons)}" if reasons else "（对应的步骤没有打开或没有跑完）") + "。补跑之后才能判定关卡。")
     if state != "PASS":
-        done = [name for name in ("memory", "pilot", "t0") if (stages.get(name) or {}).get("status") == "ok"]
+        done = [name for name in ("memory", "pilot") if (stages.get(name) or {}).get("status") == "ok"]
         if done:
             lines.append("重跑时可以关掉已经完成、与要改的代码无关的步骤：" + "、".join(f"`{SWITCHES[name]}`（{STAGES[name]}）" for name in done)
                          + "。基线回归、测试和正确性检查每次都要跑。")
-    lines.append("把这份报告整段复制回来即可；需要查细节时再给 `session3_bundle.zip`（每次运行的日志和 JSON 都在里面）。")
+    lines.append("把这份报告整段复制回来即可；需要查细节时再给 `session_bundle.zip`（每次运行的日志和 JSON 都在里面）。")
     return lines
 
 
@@ -663,11 +671,11 @@ def render(data):
          "FAIL": f"**关卡 G0：未通过。** 清单第 {'、'.join(items)} 项没有通过，见第 3.1 节。",
          "OPEN": f"**关卡 G0：还不能判定。** 清单第 {'、'.join(items)} 项没有结果。"}[state])
     counts = {level: sum(finding["level"] == level for finding in found) for level in ("block", "fix", "decide")}
-    add(f"\n必须先修的 {counts['block']} 项，建议调整的 {counts['fix']} 项，需要你决定的 {counts['decide']} 项（都在第 3 节）。本次会话要回答的七个问题：\n")
+    add(f"\n必须先修的 {counts['block']} 项，建议调整的 {counts['fix']} 项，需要你决定的 {counts['decide']} 项（都在第 3 节）。本次会话要回答的问题：\n")
     try:
         replies = answers(data, rows)
     except Exception as error:
-        replies = [("七个问题的答案生成时出错", f"{error!r}；请看第 2、3 节。")]
+        replies = [("各个问题的答案生成时出错", f"{error!r}；请看第 2、3 节。")]
     for index, (question, answer) in enumerate(replies, 1):
         add(f"{index}. **{question}** {answer}")
     add("\n## 2 关卡清单（实现说明 §10.1 的 E0-a）\n")
@@ -705,7 +713,8 @@ def render(data):
     add("## 6 没有运行的部分与下一步\n")
     stages = data.get("stages") or {}
     absent = [f"{STAGES[name]}：" + (("尚未开始（中期报告）" if name in pending else "没有打开，或会话在它之前结束") if name not in stages else f"跳过（{why(stages[name])}）")
-              for name in STAGES if name not in ("env", "feedback") and (name not in stages or stages[name].get("status") == "skipped")]
+              for name in STAGES if name not in ("env", "feedback") and (name in SWITCHES or name in pending or name in stages)
+              and (name not in stages or stages[name].get("status") == "skipped")]
     absent += [f"{describe(run)}：{budget(run.get('note'))}" for run in data.get("runs") or [] if run["status"] == "SKIPPED"]
     absent += [f"HO-FL {run['name']}：{budget(run.get('note'))}" for run in data.get("t0") or [] if run["status"] == "SKIPPED"]
     add("没有运行的：" + ("无。" if not absent else "\n\n" + "\n".join(f"- {entry}" for entry in absent)))
@@ -871,7 +880,11 @@ def _section_runs(data, add):
                   [[TASKS.get(task, task), cut, "是" if zo else "否", count, num(total / count, 3)] for (task, cut, zo), (count, total) in sorted(seconds.items())]))
         add("")
     extra = [run for run in runs if run["method"] != "m0"]
-    if extra:
+    lowest = {kind: min((run["battery_min"][kind] for run in extra if (run.get("battery_min") or {}).get(kind) is not None), default=None) for kind in "HZ"}
+    if extra and all(run["late"] == 0 and run["moved_up"] == 0 and run["zo"]["sent"] == run["zo"]["used"] and run["replica_groups_max"] == 1 for run in extra):
+        add(f"在轨的各次运行里：没有迟到的一阶更新，没有为赶截止时间上移分界，零阶报告全部被采用，副本始终只有 1 组；电量最低时 GPU 卫星 {pct(lowest['H'], 1)}%、"
+            f"推理芯片卫星 {pct(lowest['Z'], 1)}%。\n")
+    elif extra:
         add(table(["运行", "迟到的一阶更新", "上移分界的次数", "零阶报告（发出 / 采用）", "副本组数（最多）", "电量最低 %（GPU 卫星 / 推理芯片卫星）"],
                   [[describe(run), run["late"], run["moved_up"], f"{run['zo']['sent']} / {run['zo']['used']}", run["replica_groups_max"],
                     " / ".join(pct((run.get("battery_min") or {}).get(kind), 1) for kind in "HZ")] for run in extra]))
@@ -900,6 +913,8 @@ def _section_day(data, add):
 
 
 def _section_hofl(data, add):
+    if not any(run.get("accuracy") is not None or run["status"] == "SKIPPED" for run in data.get("t0") or []):
+        return   # the HO-FL runs of E0-b are not part of the session any more; the table appears only when they were run
     add("### 4.8 HO-FL 的零阶开与关（Qwen2.5-1.5B、AG News、Dirichlet 0.5、β = 0.75、160 轮）\n")
     by_seed = hofl_by_seed(data)
     rows = []

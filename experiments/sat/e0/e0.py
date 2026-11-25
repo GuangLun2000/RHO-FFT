@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 """The first experiment of the satellite scenario: gate G0 (brief v2, sections 7.5, 7.6 and 10.1).
 
-The session answers seven questions; every stage exists for one of them, cheap stages that can invalidate the rest
+The session answers six questions; every stage exists for one of them, cheap stages that can invalidate the rest
 come first, and a stage does not start when a stage it builds on ran and did not pass (``--force`` overrides):
 
   env        interpreter, packages, GPU and git state                                   -> <root>/env.json
   baseline   the regression of experiments/p0: HO-FL, FedAvg and DeComFL on this code
-             against the upstream commit, and ho-fl-replay            [E0-a item 1]     -> <root>/baseline.json
+             against the upstream commit, and ho-fl-replay; not repeated while
+             verified.json covers this code, GPU and PyTorch          [E0-a item 1]     -> <root>/baseline.json
   tests      the CPU test suite, upstream tests and tests/sat         [E0-a item 1]     -> <root>/tests.json
   trace      build the S1 trace and compare it with appendix A        [E0-a item 6]     -> <cache>/sat/traces/s1
   data       HumAID and EuroSAT, the partitions of three seeds and both data variants   -> <root>/data.json
@@ -20,9 +21,10 @@ come first, and a stage does not start when a stage it builds on ran and did not
              on the vision task: does EuroSAT saturate (gate G3), what does a run cost,
              does a repeated run reproduce                            [diagnostic]      -> <root>/pilot/
   t0         HO-FL on AG News with the zeroth-order part on and off, seeds 43 and 44
-             (seed 42 comes from the session of 2026-11-21)           [E0-b]            -> <root>/e0b/
+             (seed 42 comes from the session of 2026-11-21); run on
+             2026-11-24 and no longer part of "all"                   [E0-b]            -> <root>/e0b/
   feedback   what the session showed and what should change           -> <root>/feedback/feedback_E0.md, .json, .zip
-  all        every stage in this order (with --tiny: all but tests)
+  all        every stage but t0 in this order (with --tiny: also without tests)
 
 Requirements between the stages: selfcheck and memory need baseline and tests; smoke and pilot also need trace,
 data and selfcheck; pilot needs the two-hour run of the same method to have passed; t0 needs baseline only (it
@@ -83,6 +85,12 @@ T0_SEEDS = (43, 44)
 T0_MINUTES = {"on": 12.0, "off": 8.0}     # expected duration of a run on the G4, from the measured seconds per round
 T0_REFERENCE = {"file": "experiments/p1/references/v1_1121_qwen.json", "on": "A-b0.75", "off": "B-b0.75"}
 STAGES = ("env", "baseline", "tests", "trace", "data", "selfcheck", "memory", "smoke", "pilot", "t0", "feedback")
+# What "all" runs. The HO-FL runs of E0-b were done on 2026-11-24 (seed 44 completes them); the stage stays callable.
+SESSION = tuple(stage for stage in STAGES if stage != "t0")
+# The baseline regression that passed on Colab, and the paths it covers: everything outside the satellite package
+# that a run of upstream HO-FL executes. While these are unchanged on the same GPU and PyTorch, it is not repeated.
+VERIFIED = json.loads((HERE / "verified.json").read_text())
+BASELINE_PATHS = ("ho_fl", ":(exclude)ho_fl/sat", "pyproject.toml", "experiments/p0")
 REQUIRES = {"selfcheck": ("baseline", "tests", "data"), "memory": ("baseline", "tests"),
             "smoke": ("baseline", "tests", "trace", "data", "selfcheck"), "pilot": ("baseline", "tests", "trace", "data", "selfcheck"),
             "t0": ("baseline",)}
@@ -126,7 +134,7 @@ class Context:
         return float("inf") if self.deadline is None else self.deadline - time.time()
 
 
-def stream(ctx, command, log_path, label=None, show=None, timeout=None):
+def stream(ctx, command, log_path, label=None, show=None, timeout=None, tail=True):
     """Run a command of this repository; its output goes to ``log_path`` and, filtered by ``show``, to the page.
     ``timeout`` (seconds) ends a command that hangs, so that the session can go on to its report. Returns the exit
     code, the wall time and whether the timeout ended the command."""
@@ -157,7 +165,7 @@ def stream(ctx, command, log_path, label=None, show=None, timeout=None):
                 timer.cancel()
     if ended:
         say(f"    stopped after {timeout / 60:.0f} minutes without finishing; see {log_path}")
-    elif code != 0:
+    elif code != 0 and tail:
         say(f"    exit code {code}; end of {log_path}:")
         say("\n".join("      " + line for line in harness.tail(log_path, 30).splitlines()))
     return code, time.monotonic() - started, bool(ended)
@@ -170,7 +178,12 @@ def quiet(line):
 
 
 def progress(line):
-    return line.startswith(("round ", "EVAL", "COMPLETED", "DIVERGED"))
+    """What a training run shows on the page: its evaluations in the first two simulated hours and every fourth hour
+    after that, and how it ended. Every round and every evaluation is in the log and in the run directory."""
+    if line.startswith("EVAL"):
+        hours = float(line.split()[1])
+        return hours <= 2 or hours % 4 == 0
+    return line.startswith(("COMPLETED", "DIVERGED"))
 
 
 def module(ctx, name, fields, *positional):
@@ -299,8 +312,28 @@ def baseline_record(root, returncode=None):
             "replay": {"verdict": replay["verdict"], "max_abs_error": head.get("max_abs_error"), "comparisons": head.get("comparisons")}}
 
 
+def baseline_verified(ctx):
+    """The recorded baseline regression, if it still stands: the code it covers is unchanged since the commit it
+    passed on and, for a real session, GPU and PyTorch are the ones it passed with. ``None`` means: run it."""
+    record = VERIFIED.get("baseline")
+    if not record:
+        return None
+    env = harness.read_json(ctx.root / "env.json") or {}
+    if not ctx.tiny and (env.get("gpu_name"), env.get("torch")) != (record["gpu_name"], record["torch"]):
+        return None
+    unchanged = subprocess.run(["git", "-C", str(REPO), "diff", "--quiet", record["commit"], "--", *BASELINE_PATHS], capture_output=True).returncode == 0
+    return record if unchanged else None
+
+
 def stage_baseline(ctx):
     say("== baseline ==")
+    record = baseline_verified(ctx)
+    if record is not None:
+        harness.write_json(ctx.root / "baseline.json", {"status": "PASSED", "returncode": 0, "configs": record["configs"], "replay": record["replay"],
+                                                        "reused": {key: record[key] for key in ("commit", "date", "gpu_name", "torch")}})
+        say(f"    passed on {record['date']} at commit {record['commit'][:12]} on this GPU and PyTorch; the code of upstream HO-FL has not changed "
+            "since, so the regression is not repeated")
+        return True
     root = ctx.root / "p0"
     command = [ctx.python, str(REPO / "experiments" / "p0" / "p0.py"), "env", "golden", "regress", "feedback", "--quiet", "--root", str(root),
                "--device", ctx.device, *(["--tiny"] if ctx.tiny else ["--cache-dir", ctx.cache_dir])]
@@ -331,8 +364,9 @@ def read_junit(path):
 def stage_tests(ctx):
     say("== tests ==")
     cache = ["-o", f"cache_dir={ctx.root / 'pytest-cache'}"]   # outside the source tree; the repeat below reads it
-    show = lambda line: "passed" in line or "failed" in line or "error" in line.lower()  # noqa: E731
-    code, wall, _ = stream(ctx, [ctx.python, "-m", "pytest", "-q", *cache, f"--junitxml={ctx.root / 'pytest.xml'}"], ctx.root / "pytest.log", show=show)
+    # The page shows the result line and the names of failed tests; their tracebacks are in the log and in the report.
+    show = lambda line: line.startswith("FAILED ") or (" in " in line and (" passed" in line or " failed" in line))  # noqa: E731
+    code, wall, _ = stream(ctx, [ctx.python, "-m", "pytest", "-q", *cache, f"--junitxml={ctx.root / 'pytest.xml'}"], ctx.root / "pytest.log", show=show, tail=False)
     counts, failed = read_junit(ctx.root / "pytest.xml")
     flaky = []
     if code != 0 and 0 < len(failed) <= 10:
@@ -340,7 +374,7 @@ def stage_tests(ctx):
         # It is reported as something to fix, but it does not cost the session its GPU stages.
         say(f"    {len(failed)} test(s) failed; running them once more")
         again, extra, _ = stream(ctx, [ctx.python, "-m", "pytest", "-q", "--last-failed", "--last-failed-no-failures", "none", *cache,
-                                       f"--junitxml={ctx.root / 'pytest-repeat.xml'}"], ctx.root / "pytest-repeat.log", show=show)
+                                       f"--junitxml={ctx.root / 'pytest-repeat.xml'}"], ctx.root / "pytest-repeat.log", show=show, tail=False)
         wall += extra
         _, still = read_junit(ctx.root / "pytest-repeat.xml")
         if again == 0 and not still:
@@ -355,8 +389,9 @@ def stage_tests(ctx):
 def stage_trace(ctx):
     say("== trace ==")
     out = Path(ctx.cache_dir) / "sat" / "traces" / "s1"
-    code, _, _ = stream(ctx, [ctx.python, "-m", "ho_fl.sat.cli", "trace", "--scenario", "s1", "--output", str(out), "--tables"],
-                        ctx.root / "trace.log", show=quiet)
+    # The page shows the verdict and any statistic that disagrees; the full comparison is in the log.
+    code, _, _ = stream(ctx, [ctx.python, "-m", "ho_fl.sat.cli", "trace", "--scenario", "s1", "--output", str(out)], ctx.root / "trace.log",
+                        show=lambda line: "statistics agree" in line or "| NO |" in line or line.startswith(("scenario ", "NOTE")))
     meta, sanity = harness.read_json(out / "meta.json") or {}, harness.read_json(out / "sanity.json") or {}
     expected = EXPECTED["trace_sha256"].get(meta.get("land_source"))
     record = {"returncode": code, "path": str(out), "trace_sha256": meta.get("trace_sha256"), "land_source": meta.get("land_source"),
@@ -375,8 +410,8 @@ def stage_data(ctx):
             for seed in SEEDS:
                 name = f"{task}-{variant or 'base'}-s{seed}"
                 fields = {**ctx.sat_fields(task), "seed": seed, **({"variant": variant} if variant else {})}
-                show = quiet if seed == SEEDS[0] else (lambda line: False)   # the full table once per task and variant
-                code, _, _ = stream(ctx, module(ctx, "ho_fl.sat.datasets", fields), ctx.root / "data" / f"{name}.log", show=show)
+                # The statistics of each partition go to its log; the page gets the summary below.
+                code, _, _ = stream(ctx, module(ctx, "ho_fl.sat.datasets", fields), ctx.root / "data" / f"{name}.log", show=lambda line: False)
                 ok &= code == 0
                 tag = "-tiny" if ctx.tiny else ""
                 manifest = harness.read_json(Path(ctx.cache_dir) / "sat" / "manifests" / f"{task}{tag}-{variant or 'base'}-s{seed}.json") or {}
@@ -387,11 +422,20 @@ def stage_data(ctx):
                              "unused": len(manifest.get("unused_indices", [])), "expected_sha256": expected,
                              "matches_report": None if expected is None else expected == manifest.get("partition_sha256")})
     harness.write_json(ctx.root / "data.json", {"rows": rows})
-    say()
-    say(digest.table(["partition", "examples per satellite", "unused", "partition sha256", "as in the milestone report (P-S2)"],
-                     [[row["name"], row["examples_per_satellite"], row["unused"], (row["partition_sha256"] or "n/a")[:16],
-                       {True: "yes", False: "NO", None: "n/a"}[row["matches_report"]]] for row in rows]))
+    same = sum(row["matches_report"] is True for row in rows)
+    say(f"    {sum(not row['returncode'] for row in rows)} of {len(rows)} partitions built; {same} have the hash recorded in the milestone report (P-S2)")
+    other = [row for row in rows if row["returncode"] or (row["matches_report"] is False)]
+    if other:
+        say(digest.table(["partition", "built", "partition sha256", "as recorded"],
+                         [[row["name"], "no" if row["returncode"] else "yes", row["partition_sha256"] or "n/a", {True: "yes", False: "NO", None: "n/a"}[row["matches_report"]]]
+                          for row in other]))
     return ok
+
+
+def verdicts(line):
+    """What a self-check shows on the page: which model it ran on, how many checks passed and every check that failed.
+    The passing rows and the estimator diagnostic are in its log and, condensed, in the feedback report."""
+    return line.startswith(("Self-check", "Traceback")) or "checks passed" in line or "| FAIL |" in line or "Error" in line
 
 
 def stage_selfcheck(ctx):
@@ -402,7 +446,7 @@ def stage_selfcheck(ctx):
         if (harness.read_json(out / "selfcheck.json") or {}).get("status") == "PASSED":
             say(f"  [{task}] already passed, reusing {out}")
             continue
-        code, _, _ = stream(ctx, module(ctx, "ho_fl.sat.selfcheck", {**ctx.sat_fields(task), "output": str(out)}), out.with_suffix(".log"), show=quiet)
+        code, _, _ = stream(ctx, module(ctx, "ho_fl.sat.selfcheck", {**ctx.sat_fields(task), "output": str(out)}), out.with_suffix(".log"), show=verdicts)
         ok &= code == 0
     out = ctx.root / "selfcheck" / "upstream"
     if (harness.read_json(out / "selfcheck.json") or {}).get("status") == "PASSED":
@@ -412,7 +456,7 @@ def stage_selfcheck(ctx):
         fields = {key: value for key, value in ctx.upstream["sst2"].items()}
     else:
         fields = {**{key: T0_BASE[key] for key in ("model", "dataset", "partition")}, "device": ctx.device, "cache_dir": ctx.cache_dir}
-    code, _, _ = stream(ctx, module(ctx, "ho_fl.sat.selfcheck", {**fields, "output": str(out)}, "upstream"), out.with_suffix(".log"), show=quiet)
+    code, _, _ = stream(ctx, module(ctx, "ho_fl.sat.selfcheck", {**fields, "output": str(out)}, "upstream"), out.with_suffix(".log"), show=verdicts)
     return ok and code == 0
 
 
@@ -423,11 +467,11 @@ def stage_memory(ctx):
         out = ctx.root / "memory" / task
         if (harness.read_json(out / "memory.json") or {}).get("status") == "COMPLETED":
             say(f"  [{task}] already measured, reusing {out}")
-            say((out / "memory.md").read_text())
             continue
         if out.exists() and not any(out.iterdir()):
             out.rmdir()
-        code, _, _ = stream(ctx, module(ctx, "ho_fl.sat.calibrate", {**ctx.sat_fields(task), "output": str(out)}), out.with_suffix(".log"), show=quiet)
+        code, _, _ = stream(ctx, module(ctx, "ho_fl.sat.calibrate", {**ctx.sat_fields(task), "output": str(out)}), out.with_suffix(".log"),
+                            show=lambda line: line.startswith(("Peak GPU memory", "Memory states")))
         ok &= code == 0
     return ok
 
@@ -709,7 +753,7 @@ def main(argv=None):
     ctx = Context(args)
     stages = list(args.stages)
     if "all" in stages:
-        stages = [stage for stage in STAGES if not (ctx.tiny and stage == "tests")]
+        stages = [stage for stage in SESSION if not (ctx.tiny and stage == "tests")]
     functions = {"env": stage_env, "baseline": stage_baseline, "tests": stage_tests, "trace": stage_trace, "data": stage_data,
                  "selfcheck": stage_selfcheck, "memory": stage_memory, "smoke": stage_smoke, "pilot": stage_pilot, "t0": stage_t0,
                  "feedback": stage_feedback}
