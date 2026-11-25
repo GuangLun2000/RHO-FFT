@@ -192,7 +192,7 @@ def stream(ctx, command, log_path, label=None, show=None, timeout=None, tail=Tru
             for line in process.stdout:
                 log.write(line)
                 log.flush()
-                if line.strip():
+                if quiet(line):   # a library warning says nothing about where the command is
                     state["last"] = line.strip()
                 if show is None or show(line):
                     say(prefix + line.rstrip("\n"))
@@ -216,7 +216,7 @@ def stream(ctx, command, log_path, label=None, show=None, timeout=None, tail=Tru
 def quiet(line):
     """Lines worth showing from a command that prints tables: everything but library warnings."""
     return bool(line.strip()) and "Warning" not in line and "warnings.warn" not in line and "newly initialized" not in line \
-        and "TRAIN this model" not in line
+        and "TRAIN this model" not in line and "is deprecated" not in line
 
 
 def progress(line):

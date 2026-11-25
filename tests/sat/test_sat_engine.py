@@ -238,7 +238,9 @@ def test_train_command(assets, tmp_path, capsys):
     out = tmp_path / "cli-run"
     assert cli_main(["train", *arguments, "--tiny", "--method", "m2", "--hours", "0.5", "--eval-every", "3", "--output", str(out)]) == 0
     printed = capsys.readouterr().out
-    assert "COMPLETED: t2 m2 seed 42" in printed and printed.count("EVAL") == 2
+    assert "COMPLETED: t2 m2 seed 42" in printed and printed.count("EVAL ") == 2
+    # Each evaluation is announced before it starts, with the number of examples it will go through.
+    assert printed.count("EVALUATING at round") == 2 and "EVALUATING at round 0/" in printed and "examples of the" in printed
     assert read_json(out / "summary.json")["rounds"] == 3
     with pytest.raises(SystemExit):
         cli_main(["tune"])

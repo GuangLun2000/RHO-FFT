@@ -137,6 +137,10 @@ def run(cfg):
             raise NotImplementedError("Fault injection arrives in milestone P-S4")
 
         def log_evaluation(rounds_done, final=False):
+            # Said before it starts: on a slow GPU an evaluation takes minutes, and the page must not look stuck meanwhile.
+            indices = b.final_indices if final else b.curve_indices
+            print(f"EVALUATING at round {rounds_done}/{cfg.rounds}: {b.split_size(b.eval_split) if indices is None else len(indices)} examples of the "
+                  f"{b.eval_split} split, {len(groups.ids)} replica group(s)", flush=True)
             row = evaluate(b, groups, initial, rounds_done, cfg, final)
             append_jsonl(out / "eval.jsonl", row)
             extra = f" | held-out accuracy {100 * row['held_out_accuracy']:.2f}%" if "held_out_accuracy" in row else ""
