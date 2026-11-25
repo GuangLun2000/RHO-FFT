@@ -60,11 +60,18 @@ section of the brief it comes from.
 
 ## What a stage prints
 
-The page shows conclusions, not process: the result line of the tests and the names of failed ones, the verdict of
-the trace comparison and any statistic that disagrees, how many partitions carry the recorded hash, how many checks
-passed and every check that failed, the memory states, and of a training run its evaluations in the first two
-simulated hours and every fourth hour after that. Everything else is in the logs under `<root>`, which the result
-bundle holds; the report quotes the end of the log of whatever failed.
+The page shows where the session is at any moment, and conclusions rather than raw logs:
+
+- Every stage starts with a line saying what it is about to do and ends with its outcome and duration.
+- A training run prints one line per round (participants, training loss, seconds, time elapsed and left) and one
+  per evaluation; the checks and the memory calibration print a line per item or measurement as it completes; the
+  tests print the progress lines of pytest and the names of failed tests; the data stage prints one line per partition.
+- A command that prints nothing for 30 seconds (a download, a model being loaded) gets a line from the pipeline with
+  the time so far and the command's last line, so a slow command can be told from a stuck one.
+- The baseline regression says why it runs when it does (which file changed, or which GPU or PyTorch differs).
+
+Tracebacks, tables of passing checks and library output stay in the logs under `<root>`, which the result bundle
+holds; the report quotes the end of the log of whatever failed.
 
 ## Notes
 

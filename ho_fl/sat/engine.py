@@ -61,6 +61,10 @@ def _clock(cuda):
     return time.perf_counter()
 
 
+def _minutes(seconds):
+    return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
+
+
 def _all_finite(tensors):
     """Whether every value of every tensor is finite (one synchronisation with the device)."""
     flags = [torch.isfinite(tensor).all() for tensor in tensors]
@@ -103,6 +107,8 @@ def run(cfg):
     started = time.perf_counter()
     try:
         method = METHODS[cfg.method]
+        print(f"START: {cfg.task} {cfg.method} seed {cfg.seed} | {cfg.rounds} rounds ({cfg.hours:g} simulated hours), an evaluation every "
+              f"{cfg.eval_every} rounds | loading the trace, the model and the data", flush=True)
         trace = ensure_trace(cfg.trace_dir, cfg.scenario, slot_s=cfg.slot_s)
         if trace.meta["scenario"] != cfg.scenario or trace.slot_s != cfg.slot_s or trace.slots < cfg.rounds * cfg.slots_per_round:
             raise ValueError(f"The trace at {cfg.trace_dir} does not fit this run (scenario, slot length or duration)")
@@ -239,11 +245,16 @@ def run(cfg):
             status["last_completed_round"] = r + 1
             write_json(out / "status.json", status)
             done = r + 1
+            # One line per round: where the run is, what the round did, and what is left of it in wall time
+            # (the remaining rounds at the mean round time so far, the remaining evaluations at the mean evaluation time).
+            evaluations_done = (done - 1) // cfg.eval_every + 1
+            evaluations_left = sum(1 for k in range(done, cfg.rounds + 1) if k % cfg.eval_every == 0 or k == cfg.rounds)
+            left = (cfg.rounds - done) * wall_training / done + evaluations_left * wall["evaluation"] / evaluations_done
+            shown = "n/a" if round_loss is None else f"{round_loss:.4f}"
+            print(f"round {done}/{cfg.rounds} ({done * cfg.round_s / 3600:.1f} h) | participants B {taking_part.get('B', 0)} "
+                  f"H {taking_part.get('H', 0)} Z {taking_part.get('Z', 0)} | train loss {shown} | {logged - round_started:.1f} s | "
+                  f"{_minutes(time.perf_counter() - started)} elapsed, about {_minutes(left)} left", flush=True)
             if done % cfg.eval_every == 0 or done == cfg.rounds:
-                shown = "n/a" if round_loss is None else f"{round_loss:.4f}"
-                print(f"round {done}/{cfg.rounds} ({done * cfg.round_s / 3600:.1f} h) | participants B {taking_part.get('B', 0)} "
-                      f"H {taking_part.get('H', 0)} Z {taking_part.get('Z', 0)} | train loss {shown} | "
-                      f"{wall_training / done:.2f} s per round", flush=True)
                 evaluation_started = time.perf_counter()
                 evaluated = log_evaluation_or_stop(done)
                 wall["evaluation"] += time.perf_counter() - evaluation_started

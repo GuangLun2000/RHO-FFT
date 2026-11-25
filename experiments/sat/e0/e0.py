@@ -91,6 +91,19 @@ SESSION = tuple(stage for stage in STAGES if stage != "t0")
 # that a run of upstream HO-FL executes. While these are unchanged on the same GPU and PyTorch, it is not repeated.
 VERIFIED = json.loads((HERE / "verified.json").read_text())
 BASELINE_PATHS = ("ho_fl", ":(exclude)ho_fl/sat", "pyproject.toml", "experiments/p0")
+# What each stage is about to do, printed under its heading: the page says what is running before it runs.
+ABOUT = {"env": "interpreter, packages, GPU and commit of this session",
+         "baseline": "is upstream HO-FL unchanged: its three smoke configurations on the upstream commit and on this code",
+         "tests": "the CPU test suite in this environment (about 4 minutes; one line per 72 tests)",
+         "trace": "24 hours of the 120-satellite constellation, compared with the reference values of the brief",
+         "data": "HumAID and EuroSAT; 12 partitions: 2 tasks x 2 data variants x 3 seeds",
+         "selfcheck": "correctness on ViT / EuroSAT, on Qwen / HumAID and against upstream on Qwen / AG News; models are downloaded on first use",
+         "memory": "peak GPU memory of one participation at every cut: 9 measurements on Qwen, then 9 on ViT",
+         "smoke": "5 training runs of 2 simulated hours (12 rounds) each; one line per round",
+         "pilot": "2 training runs of 24 simulated hours (144 rounds) each on EuroSAT; one line per round",
+         "t0": "HO-FL on Qwen / AG News with the zeroth-order part on and off, seeds 43 and 44; 160 rounds each",
+         "feedback": "the report of this session"}
+HEARTBEAT_S = 30   # the longest a running command stays silent on the page
 REQUIRES = {"selfcheck": ("baseline", "tests", "data"), "memory": ("baseline", "tests"),
             "smoke": ("baseline", "tests", "trace", "data", "selfcheck"), "pilot": ("baseline", "tests", "trace", "data", "selfcheck"),
             "t0": ("baseline",)}
@@ -134,13 +147,29 @@ class Context:
         return float("inf") if self.deadline is None else self.deadline - time.time()
 
 
+def clock(seconds):
+    return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
+
+
 def stream(ctx, command, log_path, label=None, show=None, timeout=None, tail=True):
     """Run a command of this repository; its output goes to ``log_path`` and, filtered by ``show``, to the page.
-    ``timeout`` (seconds) ends a command that hangs, so that the session can go on to its report. Returns the exit
-    code, the wall time and whether the timeout ended the command."""
+    Whatever the command prints or ``show`` hides, the page gets a line at least every ``HEARTBEAT_S`` seconds with
+    the time so far and the command's last line, so a slow command can be told from a stuck one. ``timeout``
+    (seconds) ends a command that hangs, so that the session can go on to its report. Returns the exit code, the
+    wall time and whether the timeout ended the command."""
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started, ended = time.monotonic(), []
+    prefix = "    " if label is None else f"    [{label}] "
+    state, finished = {"shown": started, "last": ""}, threading.Event()
+
+    def heartbeat():
+        while not finished.wait(2):
+            if time.monotonic() - state["shown"] >= HEARTBEAT_S:
+                state["shown"] = time.monotonic()
+                say(f"{prefix}... running, {clock(time.monotonic() - started)} so far" + (f" | last line: {state['last'][:110]}" if state["last"] else ""))
+
+    threading.Thread(target=heartbeat, daemon=True).start()
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(command, cwd=str(REPO), env={**harness.tree_environment(REPO), "PYTHONUTF8": "1"}, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1)
@@ -157,10 +186,14 @@ def stream(ctx, command, log_path, label=None, show=None, timeout=None, tail=Tru
             for line in process.stdout:
                 log.write(line)
                 log.flush()
+                if line.strip():
+                    state["last"] = line.strip()
                 if show is None or show(line):
-                    say(("    " if label is None else f"    [{label}] ") + line.rstrip("\n"))
+                    say(prefix + line.rstrip("\n"))
+                    state["shown"] = time.monotonic()
             code = process.wait()
         finally:
+            finished.set()
             if timer:
                 timer.cancel()
     if ended:
@@ -178,12 +211,9 @@ def quiet(line):
 
 
 def progress(line):
-    """What a training run shows on the page: its evaluations in the first two simulated hours and every fourth hour
-    after that, and how it ended. Every round and every evaluation is in the log and in the run directory."""
-    if line.startswith("EVAL"):
-        hours = float(line.split()[1])
-        return hours <= 2 or hours % 4 == 0
-    return line.startswith(("COMPLETED", "DIVERGED"))
+    """What a training run shows on the page: its start, every round (with the time left), every evaluation and
+    how it ended."""
+    return line.startswith(("START", "round ", "EVAL", "COMPLETED", "DIVERGED"))
 
 
 def module(ctx, name, fields, *positional):
@@ -252,7 +282,6 @@ def blocked(root, stage):
 # --- stages --------------------------------------------------------------------------------------------------------------
 
 def stage_env(ctx):
-    say("== env ==")
     import torch
 
     def version(name):
@@ -313,32 +342,41 @@ def baseline_record(root, returncode=None):
 
 
 def baseline_verified(ctx):
-    """The recorded baseline regression, if it still stands: the code it covers is unchanged since the commit it
-    passed on and, for a real session, GPU and PyTorch are the ones it passed with. ``None`` means: run it."""
+    """``(record, reason)``: the recorded baseline regression if it still stands, otherwise ``None`` and why it has
+    to be run. It stands while the code it covers is unchanged since the commit it passed on and, for a real
+    session, GPU and PyTorch are the ones it passed with."""
     record = VERIFIED.get("baseline")
     if not record:
-        return None
+        return None, "no regression is on record"
     env = harness.read_json(ctx.root / "env.json") or {}
     if not ctx.tiny and (env.get("gpu_name"), env.get("torch")) != (record["gpu_name"], record["torch"]):
-        return None
-    unchanged = subprocess.run(["git", "-C", str(REPO), "diff", "--quiet", record["commit"], "--", *BASELINE_PATHS], capture_output=True).returncode == 0
-    return record if unchanged else None
+        return None, (f"the record is for {record['gpu_name']} with torch {record['torch']}; this session has "
+                      f"{env.get('gpu_name') or 'no recorded GPU'} with torch {env.get('torch') or 'unknown'}")
+    result = subprocess.run(["git", "-C", str(REPO), "diff", "--name-only", record["commit"], "--", *BASELINE_PATHS], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None, f"git could not compare with commit {record['commit'][:12]} (exit code {result.returncode}: {(result.stderr or '').strip()[:160]})"
+    changed = result.stdout.split()
+    if changed:
+        return None, f"changed since commit {record['commit'][:12]}: {', '.join(changed[:6])}" + (f" and {len(changed) - 6} more" if len(changed) > 6 else "")
+    return record, ""
 
 
 def stage_baseline(ctx):
-    say("== baseline ==")
-    record = baseline_verified(ctx)
+    record, reason = baseline_verified(ctx)
     if record is not None:
         harness.write_json(ctx.root / "baseline.json", {"status": "PASSED", "returncode": 0, "configs": record["configs"], "replay": record["replay"],
                                                         "reused": {key: record[key] for key in ("commit", "date", "gpu_name", "torch")}})
         say(f"    passed on {record['date']} at commit {record['commit'][:12]} on this GPU and PyTorch; the code of upstream HO-FL has not changed "
             "since, so the regression is not repeated")
         return True
+    say(f"    running the regression: {reason}")
+    say("    13 short runs (9 for the reference values, 3 on this code, 1 replay); the first ones download OPT-125M and SST-2")
     root = ctx.root / "p0"
     command = [ctx.python, str(REPO / "experiments" / "p0" / "p0.py"), "env", "golden", "regress", "feedback", "--quiet", "--root", str(root),
                "--device", ctx.device, *(["--tiny"] if ctx.tiny else ["--cache-dir", ctx.cache_dir])]
-    # The lines of the single runs stay in the log; the page shows the stages, the verdict table and anything unusual.
-    code, _, _ = stream(ctx, command, ctx.root / "baseline.log", show=lambda line: quiet(line) and not line.startswith((" ", "{", "}")))
+    # The page shows every run as it finishes, the stages, the verdict tables and anything unusual; the rest is in the log.
+    code, _, _ = stream(ctx, command, ctx.root / "baseline.log",
+                        show=lambda line: quiet(line) and (not line.startswith((" ", "{", "}")) or "completed in" in line or "FAILED" in line or "TIMEOUT" in line))
     record = baseline_record(root, code)
     harness.write_json(ctx.root / "baseline.json", record)
     say(f"    baseline regression: {record['status']}")
@@ -362,10 +400,9 @@ def read_junit(path):
 
 
 def stage_tests(ctx):
-    say("== tests ==")
     cache = ["-o", f"cache_dir={ctx.root / 'pytest-cache'}"]   # outside the source tree; the repeat below reads it
     # The page shows the result line and the names of failed tests; their tracebacks are in the log and in the report.
-    show = lambda line: line.startswith("FAILED ") or (" in " in line and (" passed" in line or " failed" in line))  # noqa: E731
+    show = lambda line: line.startswith("FAILED ") or line.rstrip().endswith("%]") or (" in " in line and (" passed" in line or " failed" in line))  # noqa: E731
     code, wall, _ = stream(ctx, [ctx.python, "-m", "pytest", "-q", *cache, f"--junitxml={ctx.root / 'pytest.xml'}"], ctx.root / "pytest.log", show=show, tail=False)
     counts, failed = read_junit(ctx.root / "pytest.xml")
     flaky = []
@@ -387,7 +424,6 @@ def stage_tests(ctx):
 
 
 def stage_trace(ctx):
-    say("== trace ==")
     out = Path(ctx.cache_dir) / "sat" / "traces" / "s1"
     # The page shows the verdict and any statistic that disagrees; the full comparison is in the log.
     code, _, _ = stream(ctx, [ctx.python, "-m", "ho_fl.sat.cli", "trace", "--scenario", "s1", "--output", str(out)], ctx.root / "trace.log",
@@ -403,7 +439,6 @@ def stage_trace(ctx):
 
 
 def stage_data(ctx):
-    say("== data ==")
     rows, ok = [], True
     for task in ("t1", "t2"):
         for variant in ("", "zonly"):
@@ -416,6 +451,9 @@ def stage_data(ctx):
                 tag = "-tiny" if ctx.tiny else ""
                 manifest = harness.read_json(Path(ctx.cache_dir) / "sat" / "manifests" / f"{task}{tag}-{variant or 'base'}-s{seed}.json") or {}
                 expected = None if ctx.tiny else EXPECTED["partition_sha256"].get(name)
+                say(f"    {len(rows) + 1:2d}/12 {name}: " + ("FAILED, see data/" + name + ".log" if code else
+                    f"{manifest.get('examples_per_satellite')} examples per satellite, partition {(manifest.get('partition_sha256') or 'n/a')[:12]}"
+                    + {True: ", as recorded", False: ", NOT the recorded hash", None: ""}[None if expected is None else expected == manifest.get("partition_sha256")]))
                 rows.append({"name": name, "task": task, "variant": variant or "base", "seed": seed, "returncode": code,
                              "partition_sha256": manifest.get("partition_sha256"), "labels_sha256": manifest.get("labels_sha256"),
                              "data_sha256": manifest.get("data_sha256"), "examples_per_satellite": manifest.get("examples_per_satellite"),
@@ -433,13 +471,12 @@ def stage_data(ctx):
 
 
 def verdicts(line):
-    """What a self-check shows on the page: which model it ran on, how many checks passed and every check that failed.
-    The passing rows and the estimator diagnostic are in its log and, condensed, in the feedback report."""
-    return line.startswith(("Self-check", "Traceback")) or "checks passed" in line or "| FAIL |" in line or "Error" in line
+    """What a self-check shows on the page: what it is loading and checking as it goes, how many checks passed and
+    every check that failed. The passing rows and the estimator table are in its log and, condensed, in the report."""
+    return line.startswith(("> ", "Self-check", "Traceback")) or "checks passed" in line or "| FAIL |" in line or "Error" in line
 
 
 def stage_selfcheck(ctx):
-    say("== selfcheck ==")
     ok = True
     for task in ("t2", "t1"):
         out = ctx.root / "selfcheck" / task
@@ -461,7 +498,6 @@ def stage_selfcheck(ctx):
 
 
 def stage_memory(ctx):
-    say("== memory ==")
     ok = True
     for task in ("t1", "t2"):
         out = ctx.root / "memory" / task
@@ -471,13 +507,12 @@ def stage_memory(ctx):
         if out.exists() and not any(out.iterdir()):
             out.rmdir()
         code, _, _ = stream(ctx, module(ctx, "ho_fl.sat.calibrate", {**ctx.sat_fields(task), "output": str(out)}), out.with_suffix(".log"),
-                            show=lambda line: line.startswith(("Peak GPU memory", "Memory states")))
+                            show=lambda line: line.startswith(("> ", "Memory states")))
         ok &= code == 0
     return ok
 
 
 def stage_smoke(ctx):
-    say("== smoke ==")
     statuses = {}
     for name, task, method in SMOKE:
         statuses[name] = run_sat(ctx, name, run_fields(ctx, task, method, SMOKE_HOURS), ctx.root / "smoke" / name, timeout=1800)
@@ -511,7 +546,6 @@ def day_estimate_s(short, hours, round_s=600, eval_every=6):
 
 
 def stage_pilot(ctx):
-    say("== pilot ==")
     hours = TINY_DAY_HOURS if ctx.tiny else DAY_HOURS
     statuses, skipped, estimates = {}, {}, {}
     for name, task, method in DAY:
@@ -547,7 +581,6 @@ def t0_runs(ctx):
 
 
 def stage_t0(ctx):
-    say("== t0 ==")
     ok, skipped = True, {}
     for spec in t0_runs(ctx):
         out = ctx.root / "e0b" / spec["name"]
@@ -706,7 +739,6 @@ def collect(ctx):
 
 
 def stage_feedback(ctx):
-    say("== feedback ==")
     out = ctx.root / "feedback"
     out.mkdir(parents=True, exist_ok=True)
     data = collect(ctx)
@@ -761,10 +793,12 @@ def main(argv=None):
     for stage in stages:
         reason, error = None if ctx.force else blocked(ctx.root, stage), None
         started = time.monotonic()
+        say(f"== {stage} ==")
         if reason:
-            say(f"== {stage} ==\n  skipped: the stage '{reason}' did not pass (--force runs it anyway)")
+            say(f"  skipped: the stage '{reason}' did not pass (--force runs it anyway)")
             results[stage] = "skipped"
         else:
+            say(f"  {ABOUT[stage]}")
             try:
                 results[stage] = "ok" if functions[stage](ctx) else "attention"
             except Exception:   # a stage that breaks is recorded like one that fails: what builds on it is skipped, the report shows why
@@ -772,7 +806,7 @@ def main(argv=None):
                 say(error)
                 results[stage] = "attention"
         record_stage(ctx.root, stage, results[stage], time.monotonic() - started, reason, error and "\n".join(error.splitlines()[-20:]))
-        say()
+        say(f"  {stage}: {results[stage].upper() if results[stage] != 'ok' else 'ok'} in {clock(time.monotonic() - started)}\n")
     say("stage results: " + ", ".join(f"{stage}={result.upper() if result != 'ok' else result}" for stage, result in results.items()))
     return 0 if all(result == "ok" for result in results.values()) else 1
 

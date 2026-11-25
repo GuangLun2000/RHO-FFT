@@ -107,12 +107,14 @@ def run(sat, out):
         raise RuntimeError(f"Refusing to overwrite {out}")
     out.mkdir(parents=True, exist_ok=True)
     task = sat.spec
+    print(f"> loading {task.model} for task {task.key}", flush=True)
     cfg, wrapper, params, tokens, batch, shape = load_parts(sat)
-    rows = [measure(cfg, wrapper, params, tokens, batch, 0, "inference")]
-    for cut in sorted({0, *task.ladder}):
-        rows.append(measure(cfg, wrapper, params, tokens, batch, cut, "hybrid"))
-    for cut in task.ladder[:-1]:
-        rows.append(measure(cfg, wrapper, params, tokens, batch, cut, "frozen"))
+    plan = [(0, "inference")] + [(cut, "hybrid") for cut in sorted({0, *task.ladder})] + [(cut, "frozen") for cut in task.ladder[:-1]]
+    rows = []
+    for index, (cut, mode) in enumerate(plan, 1):
+        rows.append(measure(cfg, wrapper, params, tokens, batch, cut, mode))
+        peak = rows[-1]["peak_allocated_gb"]
+        print(f"> measurement {index}/{len(plan)}: cut {cut}, {mode}: " + ("no GPU, memory not measured" if peak is None else f"{peak:.2f} GB peak"), flush=True)
     cuda = torch.device(cfg.device).type == "cuda"
     by_cut = {row["cut"]: row["peak_allocated_gb"] for row in rows if row["mode"] == "hybrid"}
     result = {"task": task.key, "model": task.model, "depth": task.depth, "batch_shape": shape, "local_steps": cfg.E,

@@ -351,15 +351,26 @@ def main(argv=None):
         from ..train import Backend
 
         cfg = parse_config(argv[1:])
-        rows = check_upstream_participation(Backend(cfg))
+        print(f"> loading {cfg.model} and {cfg.dataset} as upstream HO-FL does", flush=True)
+        upstream = Backend(cfg)
+        print("> item 3: one participation through upstream train_client and through the satellite code, three cuts, two rounds each", flush=True)
+        rows = check_upstream_participation(upstream)
         return finish(rows, cfg.output, f"Self-check against upstream HO-FL ({cfg.model}, {cfg.dataset}, {cfg.device})",
                       {**environment, "model": cfg.model, "dataset": cfg.dataset, "device": cfg.device})
     from .backend import SatBackend
     from .config import parse_sat_config
 
     sat = parse_sat_config(argv)
+    print(f"> loading the model and the data of task {sat.task} ({sat.spec.model}, {sat.spec.dataset})", flush=True)
     b = SatBackend(sat)
-    rows = check_hybrid_step(b) + check_aggregation(b) + check_replay(b)
+    rows = []
+    for item, what, check in ((2, "local steps with explicit cuts", check_hybrid_step), (4, "aggregation against the central rule", check_aggregation),
+                              (5, "replay on two replicas", check_replay)):
+        print(f"> item {item}: {what}", flush=True)
+        found = check(b)
+        print(f">   {sum(row['passed'] for row in found)} of {len(found)} checks passed", flush=True)
+        rows += found
+    print("> diagnostic: zeroth-order scalars against exact directional derivatives, every cut, three radii", flush=True)
     estimator = check_estimator(b)
     print(render_estimator(estimator, b.cfg.mu), flush=True)
     return finish(rows, sat.output, f"Self-check of task {sat.task} ({b.task.model}, {b.task.dataset}, {sat.device}{', tiny assets' if sat.tiny else ''})",

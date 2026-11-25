@@ -442,12 +442,14 @@ def test_the_baseline_regression_is_not_repeated_while_its_record_stands(tmp_pat
     record = e0.VERIFIED["baseline"]
     assert set(record["configs"]) == {"hofl", "fedavg", "decomfl"} and all(entry["verdict"] == "PASS_BITWISE" for entry in record["configs"].values())
     calls, changed = [], [False]
-    monkeypatch.setattr(e0.subprocess, "run", lambda command, **options: (calls.append(command), types.SimpleNamespace(returncode=int(changed[0])))[1])
+    monkeypatch.setattr(e0.subprocess, "run", lambda command, **options: (calls.append(command), types.SimpleNamespace(
+        returncode=0, stdout="ho_fl/train.py\nho_fl/algorithms.py\n" if changed[0] else "", stderr=""))[1])
     ctx = types.SimpleNamespace(root=tmp_path, tiny=False)
-    assert e0.baseline_verified(ctx) is None and calls == []            # no record of the environment: run it
+    verdict, reason = e0.baseline_verified(ctx)                         # no record of the environment: run it, and say why
+    assert verdict is None and calls == [] and "this session has no recorded GPU" in reason
     (tmp_path / "env.json").write_text(json.dumps({"gpu_name": record["gpu_name"], "torch": record["torch"]}))
-    assert e0.baseline_verified(ctx) == record
-    assert calls[0][3:6] == ["diff", "--quiet", record["commit"]] and list(calls[0][-4:]) == list(e0.BASELINE_PATHS)   # against the working tree
+    assert e0.baseline_verified(ctx) == (record, "")
+    assert calls[0][3:6] == ["diff", "--name-only", record["commit"]] and list(calls[0][-4:]) == list(e0.BASELINE_PATHS)   # against the working tree
     assert e0.stage_baseline(ctx) is True and "is not repeated" in capsys.readouterr().out
     written = json.loads((tmp_path / "baseline.json").read_text())
     assert written["status"] == "PASSED" and written["reused"]["commit"] == record["commit"] and written["replay"]["verdict"] == "PASS"
@@ -455,16 +457,31 @@ def test_the_baseline_regression_is_not_repeated_while_its_record_stands(tmp_pat
     assert digest.gate(digest.checklist(data)) == ("PASS", []) and "此后 HO-FL 的代码没有改动，本次不重跑" in digest.checklist(data)[1][3]
     assert "所以没有重跑" in digest.render(data)
     changed[0] = True                                                   # the code of upstream HO-FL changed: run it
-    assert e0.baseline_verified(ctx) is None
+    assert e0.baseline_verified(ctx) == (None, f"changed since commit {record['commit'][:12]}: ho_fl/train.py, ho_fl/algorithms.py")
     changed[0] = False
     (tmp_path / "env.json").write_text(json.dumps({"gpu_name": "another GPU", "torch": record["torch"]}))
-    assert e0.baseline_verified(ctx) is None                            # another GPU: run it
-    assert e0.baseline_verified(types.SimpleNamespace(root=tmp_path, tiny=True)) == record   # a dry run only looks at the code
+    verdict, reason = e0.baseline_verified(ctx)                         # another GPU: run it
+    assert verdict is None and "this session has another GPU with torch 2.7.1+cu128" in reason
+    assert e0.baseline_verified(types.SimpleNamespace(root=tmp_path, tiny=True)) == (record, "")   # a dry run only looks at the code
+
+
+def test_a_silent_command_still_shows_that_it_is_running(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(e0, "HEARTBEAT_S", 0.5)
+    ctx = types.SimpleNamespace(root=tmp_path)
+    script = "import time; print('first line', flush=True); print('hidden detail', flush=True); time.sleep(4); print('last line', flush=True)"
+    code, wall, ended = e0.stream(ctx, [e0.sys.executable, "-c", script], tmp_path / "quiet.log", label="job", show=lambda line: "first" in line or "last" in line)
+    printed = capsys.readouterr().out
+    # The hidden line never reaches the page as such, but the heartbeat quotes it: the page shows where the command is.
+    assert (code, ended) == (0, False) and wall >= 4 and "    [job] first line" in printed and "    [job] last line" in printed
+    assert "    [job] ... running, 0:0" in printed and "| last line: hidden detail" in printed and "\n    [job] hidden detail" not in printed
+    assert (tmp_path / "quiet.log").read_text().splitlines() == ["first line", "hidden detail", "last line"]
 
 
 def test_what_the_page_shows_of_a_stage():
-    lines = ["EVAL   0.0 h (round 0/144) | x", "EVAL   2.0 h (round 12/144) | x", "EVAL   3.0 h (round 18/144) | x", "EVAL   8.0 h (round 48/144) | x",
-             "round 18/144 (3.0 h) | x", "COMPLETED: t2 m7 seed 42", "DIVERGED: t2 m7", "something else"]
-    assert [e0.progress(line) for line in lines] == [True, True, False, True, False, True, True, False]
+    # A training run: its start, every round, every evaluation and its end; nothing of the libraries' chatter.
+    lines = ["START: t2 m7 seed 42 | 144 rounds", "EVAL   3.0 h (round 18/144) | x", "round 18/144 (3.0 h) | x", "COMPLETED: t2 m7 seed 42", "DIVERGED: t2 m7",
+             "Some weights of ViTForImageClassification were not initialized"]
+    assert [e0.progress(line) for line in lines] == [True, True, True, True, True, False]
+    assert e0.verdicts("> item 4: aggregation against the central rule") and e0.clock(125.4) == "2:05" and set(e0.ABOUT) == set(e0.STAGES)
     assert e0.verdicts("Self-check of task t2 (vit)") and e0.verdicts("15 of 15 checks passed") and e0.verdicts("| 4 | a check | FAIL | detail |")
     assert not e0.verdicts("| 4 | a check | pass | detail |") and not e0.verdicts("| 3 | 0.01 (configured) | 64 | 0.99 | 1.00 | 0.95 |")
