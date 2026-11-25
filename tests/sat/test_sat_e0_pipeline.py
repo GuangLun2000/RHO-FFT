@@ -331,15 +331,136 @@ def test_a_stage_is_marked_when_it_starts_and_short_runs_respect_the_budget(tmp_
     (tmp_path / "smoke" / "t1-m7").mkdir(parents=True)
     (tmp_path / "smoke" / "t1-m7" / "status.json").write_text(json.dumps({"status": "RUNNING", "last_completed_round": 0}))
     assert e0.read_run(tmp_path / "smoke" / "t1-m7", "t1-m7", "short", "t1", "m7", 2.0, started=False)["status"] == "INTERRUPTED"
+    # The same when the interruption reached the run itself (the stop button signals everything the cell started) ...
+    (tmp_path / "smoke" / "t1-m7" / "status.json").write_text(json.dumps({"status": "FAILED", "error": "KeyboardInterrupt()"}))
+    assert e0.read_run(tmp_path / "smoke" / "t1-m7", "t1-m7", "short", "t1", "m7", 2.0, started=False)["status"] == "INTERRUPTED"
+    # ... but a run that broke on its own, or whose end the pipeline recorded, failed.
+    (tmp_path / "smoke" / "t1-m7" / "status.json").write_text(json.dumps({"status": "FAILED", "error": "RuntimeError('CUDA out of memory')"}))
+    assert e0.read_run(tmp_path / "smoke" / "t1-m7", "t1-m7", "short", "t1", "m7", 2.0, started=False)["status"] == "FAILED"
+    (tmp_path / "smoke" / "t1-m7" / "status.json").write_text(json.dumps({"status": "RUNNING"}))
+    (tmp_path / "smoke" / "t1-m7" / "run_meta.json").write_text(json.dumps({"status": "TIMEOUT", "wall_s": 1800.0}))
+    assert e0.read_run(tmp_path / "smoke" / "t1-m7", "t1-m7", "short", "t1", "m7", 2.0, started=False)["status"] == "TIMEOUT"
     # Once the budget of the session is used up no new short run starts; a finished one is still reused.
     write_run(tmp_path / "smoke" / "t2-m7", [2.0, 1.9, 1.8], [0.1, 0.4])
     (tmp_path / "smoke" / "t2-m7" / "status.json").write_text(json.dumps({"status": "COMPLETED"}))
-    ctx = types.SimpleNamespace(root=tmp_path, tiny=False, remaining=lambda: -1.0, sat_fields=lambda task: {})
+    ctx = types.SimpleNamespace(root=tmp_path, tiny=False, remaining=lambda: -1.0, sat_fields=lambda task: {}, limit=lambda seconds: seconds)
     assert e0.stage_smoke(ctx) is False
     record = json.loads((tmp_path / "smoke.json").read_text())
-    assert record["statuses"] == {"t2-m7": "COMPLETED", "t2-m0": "SKIPPED", "t2-m2": "SKIPPED", "t2-m4": "SKIPPED", "t1-m7": "SKIPPED"}
-    assert set(record["skipped"]) == {"t2-m0", "t2-m2", "t2-m4", "t1-m7"} and "[t2-m0] skipped: the budget of the session is used up" in capsys.readouterr().out
+    others = [name for name, _, _ in e0.SMOKE if name != "t2-m7"]
+    assert record["statuses"] == {"t2-m7": "COMPLETED", **{name: "SKIPPED" for name in others}} and len(others) == 6
+    assert set(record["skipped"]) == set(others) and "[t2-m0] skipped: the budget of the session is used up" in capsys.readouterr().out
     assert digest.budget(record["skipped"]["t2-m0"]) == "会话的预算已经用完，没有开始" and digest.budget({"needed_min": 12.0, "left_min": 5.0}).startswith("预算不够")
+
+
+def with_channels(data, cosine=0.012, error=0.002):
+    """The session with the channel statistics of the day-long run of the full method on EuroSAT: twelve blocks and
+    the head, the first-order share growing with the height of the block as the cut table makes it."""
+    first = [0.36] * 3 + [0.65] * 3 + [0.72] * 6 + [1.0]
+    day = next(entry for entry in data["runs"] if entry["name"] == "t2-m7-day")
+    day.update(cuts=[0, 3, 6, 9, 12], channels={
+        "rounds": 144, "blocks": list(range(13)), "fo_share": first, "zo_share": [round(1 - share, 2) for share in first],
+        "fo_norm": [0.004] * 3 + [0.006] * 9 + [0.005], "zo_norm": [0.0018] * 3 + [0.0012] * 9 + [0.0],
+        "cos": [cosine] * 12 + [None], "cos_se": [error] * 12 + [None], "cos_rounds": [144] * 12 + [0]})
+    return data
+
+
+def test_the_summary_card_the_ordering_of_the_methods_and_the_two_channels():
+    data = experiments_only()
+    # The card of the notebook page: where the session ran, how far each step got, one row per run.
+    card = digest.card(data)
+    assert "| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |" in card and "| 代码 | `abcdef123456` |" in card and "| 会话用时 | 1.30 h |" in card
+    assert "| 显存标定 | 完成 |" in card and "| 一整天的运行 | 完成 |" in card
+    assert "| EuroSAT · 完整方法 · 2 个仿真小时 | 完成 | 10.0 → 70.0 | 2.3000 → 1.9000 | 1.50 |" in card and "还不能用来给方法排名" in card
+    stopped = experiments_only()
+    stopped["stages"]["smoke"] = {"status": "running", "wall_s": 0.0, "calls": 0, "blocked_by": None, "error": None}
+    stopped["runs"][4] = {**run("t1-m7", "t1", "m7", [0.14], status="INTERRUPTED", rounds=0, wall_s=None), "inputs_as_recorded": {}}
+    assert "| 短程运行 | 被中断（5 次运行里 4 次跑完） |" in digest.card(stopped) and "| HumAID · 完整方法 · 0 个仿真小时 | 被中断 | 14.0 → 14.0 | 无 | 无 | 无 |" in digest.card(stopped)
+    assert "预演" in digest.card({**data, "tiny": True}) and "| GPU |" not in digest.card({**data, "tiny": True})
+    # A session without a budget says how long it took and nothing about a budget.
+    free = {**data, "session": {key: value for key, value in data["session"].items() if key != "budget_hours"}}
+    assert "会话已用 1.30 h。" in digest.render(free) and "预算" not in digest.render(free).split("## 1 结论")[0]
+    # What the methods reached, stated as observed and with what keeps it from being a ranking.
+    order = [finding["text"] for finding in digest.findings(data) if finding["topic"] == "方法之间"]
+    assert len(order) == 2 and all("不能据此给方法排名" in text for text in order)
+    assert "EuroSAT，短程运行（2 个仿真小时）结束时的验证准确率：理想中心化 80.0%，只让强星训练 75.0%，完整方法 70.0%，纯零阶泛洪 15.0%。" in order[0]
+    assert "完整方法结束时比只让强星训练低 5.0 个点，每一次评估都不高于它。" in order[0] and "全部卫星的十分之一" in order[0]
+    assert "EuroSAT，一整天的运行（24 个仿真小时）结束时的验证准确率：理想中心化 95.0%，完整方法 93.0%。" in order[1] and "只让强星训练" not in order[1]
+    ahead = experiments_only()
+    ahead["runs"].append(run("t2-m2-day", "t2", "m2", [0.10, 0.60] + [0.80] * 23, group="day"))   # ahead after one hour, overtaken by the end
+    text = next(finding["text"] for finding in digest.findings(ahead) if finding["topic"] == "方法之间" and "一整天" in finding["text"])
+    assert "理想中心化 95.0%，完整方法 93.0%，只让强星训练 80.0%" in text and "完整方法从第 " in text and "小时之后一直高于只让强星训练，结束时领先 13.0 个点。" in text
+    assert "参与过训练的卫星" not in text   # the fixture has no count of them
+    for entry in ahead["runs"]:
+        entry["satellites"] = 12 if entry["method"] == "m2" else 117
+    text = next(finding["text"] for finding in digest.findings(ahead) if finding["topic"] == "方法之间" and "一整天" in finding["text"])
+    assert "到结束时参与过训练的卫星：完整方法 117 颗，只让强星训练 12 颗（星座共 120 颗，数据按卫星划分）。" in text
+    # The two channels: the lowest blocks get few first-order updates, and the report says whether the zeroth-order
+    # updates of the others point the same way, by the measured cosine and its standard error.
+    assert not [finding for finding in digest.findings(data) if finding["topic"] == "两条通道"] and "两条通道对更新的贡献" not in digest.render(data)
+    data = with_channels(experiments_only())
+    facts = digest.channel_facts(find_day(data))
+    assert [(fact["label"], fact["low"], fact["high"]) for fact in facts] == [("第 0–2 层", 0, 2), ("第 3–5 层", 3, 5), ("第 6–11 层", 6, 11), ("分类头", 12, 12)]
+    assert facts[0]["fo_share"] == pytest.approx(0.36) and facts[0]["cos_se"] == pytest.approx(0.002 / 3 ** 0.5) and facts[3]["cos"] is None
+    finding = next(finding for finding in digest.findings(data) if finding["topic"] == "两条通道")
+    assert finding["level"] == "note" and "EuroSAT · 完整方法 · 24 个仿真小时：第 0–2 层里，平均只有 36% 的参与者送来一阶更新" in finding["text"]
+    assert "零阶部分的范数是一阶部分的 0.45 倍，两部分方向的余弦平均 +0.0120（标准误约 0.0012）。" in finding["text"]
+    assert "余弦为正且超出误差范围" in finding["text"] and "一致的程度很低" in finding["text"]
+    text = digest.render(data)
+    assert "### 4.6 两条通道对更新的贡献（各轮平均）" in text
+    assert "| EuroSAT · 完整方法 · 24 个仿真小时 | 第 0–2 层 | 36 | 64 | 0.004 | 0.0018 | +0.0120（0.0012） |" in text
+    assert "| EuroSAT · 完整方法 · 24 个仿真小时 | 分类头 | 100 | 0 | 0.005 | 0 | 无 |" in text
+    noise = next(finding for finding in digest.findings(with_channels(experiments_only(), cosine=0.001)) if finding["topic"] == "两条通道")
+    assert noise["level"] == "note" and "余弦与 0 分不开" in noise["text"] and "分母变大" in noise["text"]
+    against = next(finding for finding in digest.findings(with_channels(experiments_only(), cosine=-0.02)) if finding["topic"] == "两条通道")
+    assert against["level"] == "fix" and "抵消一阶更新的方向" in against["text"] and "replay_zeroth_order" in against["action"]
+
+
+def find_day(data):
+    return next(entry for entry in data["runs"] if entry["name"] == "t2-m7-day")
+
+
+def test_the_channel_statistics_of_a_run_are_averaged_over_its_rounds():
+    rounds = [{"channels": {"counted": 10, "blocks": [0, 1], "fo_n": [4, 10], "zo_n": [6, 0], "fo_norm": [0.2, 0.4], "zo_norm": [0.1, 0.0], "cos": [0.02, None]}},
+              {"channels": {"counted": 5, "blocks": [0, 1], "fo_n": [1, 5], "zo_n": [4, 0], "fo_norm": [0.4, 0.2], "zo_norm": [0.3, 0.0], "cos": [0.04, None]}},
+              {"channels": {"counted": 4, "blocks": [1], "fo_n": [4], "zo_n": [0], "fo_norm": [0.3], "zo_norm": [0.0], "cos": [None]}},   # nobody sent anything to block 0
+              {"channels": None}]                                                                                                      # a round without participants
+    stats = e0.channel_summary(rounds)
+    assert (stats["rounds"], stats["blocks"]) == (3, [0, 1])
+    assert stats["fo_share"] == pytest.approx([(0.4 + 0.2 + 0.0) / 3, 1.0]) and stats["zo_share"] == pytest.approx([(0.6 + 0.8 + 0.0) / 3, 0.0])
+    assert stats["fo_norm"] == pytest.approx([0.2, 0.3]) and stats["zo_norm"] == pytest.approx([0.4 / 3, 0.0])
+    assert stats["cos"][0] == pytest.approx(0.03) and stats["cos"][1] is None and stats["cos_rounds"] == [2, 0]
+    assert stats["cos_se"][0] == pytest.approx(0.01) and stats["cos_se"][1] is None
+    assert e0.channel_summary([{"task_loss": 1.0}]) is None   # a run logged before the statistics existed
+
+
+def test_the_figures_of_a_session(tmp_path):
+    pytest.importorskip("matplotlib")   # drawn in the notebook's own Python; the pinned environment of the pipeline need not have it
+    spec = importlib.util.spec_from_file_location("sat_e0_plots", REPO / "experiments" / "sat" / "e0" / "plots.py")
+    plots = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plots)
+    data = with_channels(experiments_only())
+    for entry in data["runs"]:
+        entry["round_loss"] = [2.3 - 0.002 * index for index in range(entry["rounds"])]
+    shown = plots.figures(data, tmp_path / "figures")
+    assert [(path.name, error) for _, path, error in shown] == [(name + ".png", None) for name in (
+        "accuracy_t2_short", "accuracy_t2_day", "loss_t2_day", "accuracy_t1_short", "channels_t2", "memory")]
+    assert all(path.stat().st_size > 10_000 for _, path, _ in shown) and shown[0][0] == "EuroSAT · 短程运行：验证准确率随仿真时间的变化"
+    # A method has its colour whichever other methods are drawn with it; two or more series get a legend, and every
+    # line its value at the right end, in ink and not in the colour of the series.
+    assert len(set(plots.METHOD_COLOURS.values())) == len(plots.METHOD_COLOURS) == 8
+    with plots.matplotlib.rc_context(plots.STYLE):
+        drawn = {key: figure for key, _, figure in plots.curve_figures(data)}
+    four, alone = drawn["accuracy_t2_short"].axes[0], drawn["accuracy_t1_short"].axes[0]
+    assert {line.get_label(): line.get_color() for line in four.lines if not line.get_label().startswith("_")} == {
+        "Full method (RHO-FFT)": "#257de0", "Ideal centralised": "#f47230", "Backbone satellites only": "#00b894", "Zeroth-order flooding": "#f2a600"}
+    assert four.get_legend() is not None and sorted(text.get_text() for text in four.texts) == [
+        "Backbone only  75.0%", "Full method  70.0%", "Ideal  80.0%", "ZO flooding  15.0%"]
+    assert all(text.get_color() == plots.INK for text in four.texts)
+    assert alone.get_legend() is None and [line.get_color() for line in alone.lines if not line.get_label().startswith("_")] == ["#257de0"]
+    assert len(drawn["loss_t2_day"].axes) == 1 and drawn["loss_t2_day"].axes[0].get_ylabel().startswith("Training loss")   # one y-axis per chart
+    # Nothing to draw is not an error, and data that cannot be drawn is named instead of raised.
+    assert plots.figures({"runs": [], "memory": {}}, tmp_path / "none") == []
+    assert all(path is None and error for _, path, error in plots.figures({"runs": "x", "memory": {"t2": {"rows": "y"}}}, tmp_path / "bad"))
 
 
 def test_the_inputs_of_a_run_are_compared_with_the_pinned_hashes():
@@ -383,6 +504,7 @@ def test_runs_are_read_from_their_directories(tmp_path):
     assert (record["status"], record["rounds"], record["depth"], record["wall_s"]) == ("COMPLETED", 12, 12, 99.0)
     assert record["participants"] == {"B": 1, "H": 1, "Z": 1} and record["skipped"]["eclipse"] == 12 and record["zo"] == {"sent": 24, "used": 24, "dropped": 0}
     assert record["battery_min"] == {"H": 0.9, "Z": pytest.approx(0.84)} and record["replica_groups_max"] == 1
+    assert record["satellites"] == 0 and record["round_loss"] == losses and record["channels"] is None and record["cuts"] is None   # the ledger of this fixture names no satellite
     assert record["seconds"]["round"] == 1.0 and record["seconds"]["evaluation"] == 2.0 and record["seconds"]["startup"] == 15.0
     assert record["seconds"]["parts"] == pytest.approx({"train": 0.7, "deliver": 0.1, "aggregate": 0.2, "log": 0.0})
     assert record["participation_seconds"] == [{"kind": "B", "cut": 0, "zo": False, "count": 12, "mean_s": pytest.approx(0.1)},
@@ -489,12 +611,23 @@ def test_a_stage_does_not_start_when_what_it_builds_on_did_not_pass(tmp_path):
         ("selfcheck", "memory", "smoke", "pilot", "t0"), "baseline")
     assert e0.blocked(tmp_path, "tests") is None and e0.blocked(tmp_path, "feedback") is None
     e0.record_stage(tmp_path, "baseline", "ok", 1.0)
-    # The day-long runs wait for the two-hour runs of the same methods.
+    # A day-long run waits for the two-hour run of its own method: the full method has to pass (its loss goes down),
+    # the others only have to complete. The stage as a whole is held back only when no method got that far.
     passed = {"status": "COMPLETED", "passed": True, "completed": True}
+    assert e0.short_run_passed(tmp_path, "t2", "m7") is None   # no verdicts: the short runs were not run, or were interrupted
     (tmp_path / "smoke.json").write_text(json.dumps({"verdicts": {"t2-m7": passed, "t2-m0": {**passed, "passed": False}}}))
-    assert e0.blocked(tmp_path, "pilot") is None   # the centralised reference only has to complete
+    assert e0.blocked(tmp_path, "pilot") is None
+    assert [e0.short_run_passed(tmp_path, "t2", method) for method in ("m7", "m0", "m2")] == [True, True, False]
     (tmp_path / "smoke.json").write_text(json.dumps({"verdicts": {"t2-m7": {**passed, "passed": False}, "t2-m0": passed}}))
+    assert e0.blocked(tmp_path, "pilot") is None and e0.short_run_passed(tmp_path, "t2", "m7") is False
+    (tmp_path / "smoke.json").write_text(json.dumps({"verdicts": {"t2-m7": {**passed, "passed": False}}}))
     assert e0.blocked(tmp_path, "pilot") == "smoke"
+    # Inside the stage: the methods whose two-hour run did not pass are left out, with the reason, without a run being started.
+    ctx = types.SimpleNamespace(root=tmp_path, tiny=False, remaining=lambda: float("inf"), sat_fields=lambda task: {}, limit=lambda seconds: None)
+    assert e0.stage_pilot(ctx) is False
+    record = json.loads((tmp_path / "pilot.json").read_text())
+    assert set(record["statuses"].values()) == {"SKIPPED"} and all(note["why"] == "short" for note in record["skipped"].values())
+    assert digest.budget(record["skipped"]["t2-m7-day"]) == "同一方法的短程运行没有通过，没有开始"
 
 
 def test_a_blocked_stage_is_recorded_as_skipped(tmp_path, capsys):

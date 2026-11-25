@@ -15,11 +15,12 @@ come first, and a stage does not start when a stage it builds on ran and did not
              central rule, replay across replicas, on the real models [E0-a items 2-5];
              and how faithful the zeroth-order scalars are            [diagnostic]      -> <root>/selfcheck/
   memory     peak GPU memory of a participation per cut, Qwen and ViT [section 7.6]     -> <root>/memory/
-  smoke      two simulated hours of the full method on both tasks and of the three other
-             methods on the vision task                               [E0-a item 7]     -> <root>/smoke/
-  pilot      a whole simulated day of the full method and of the centralised reference
-             on the vision task: does EuroSAT saturate (gate G3), what does a run cost,
-             does a repeated run reproduce                            [diagnostic]      -> <root>/pilot/
+  smoke      two simulated hours of every implemented method on the vision task and of the
+             full method, the centralised reference and the backbone-only method on the
+             text task                                                [E0-a item 7]     -> <root>/smoke/
+  pilot      a whole simulated day of every implemented method on the vision task: how
+             the methods compare once a run is long enough to tell, does EuroSAT saturate
+             (gate G3), what does a run cost, does a repeated run reproduce [diagnostic] -> <root>/pilot/
   t0         HO-FL on AG News with the zeroth-order part on and off, seeds 43 and 44
              (seed 42 comes from the session of 2026-11-21); run on
              2026-11-24 and no longer part of "all"                   [E0-b]            -> <root>/e0b/
@@ -34,6 +35,10 @@ Since 2026-11-25 the Colab session calls only ``memory``, ``smoke`` and ``pilot`
 there and the research lead took them out to keep GPU time for measurements and runs. A run builds the trace and
 its partition itself on first use and records their hashes, which the report compares with expected.json. The
 check stages stay callable, and ``all`` (the local dry run) still goes through every one of them.
+
+Nothing is stopped for taking long unless the caller sets a budget (``--budget-hours`` or ``--deadline``): the
+notebook sets none, by decision of the research lead. With a budget, a run that does not fit is not started, no
+new short run starts once it is used up, and a run that takes several times what it should is ended.
 
 Every run is a subprocess of this repository's code (nothing is installed). ``--tiny`` replaces models and data by
 the synthetic assets of ho_fl.testing and ho_fl.sat.testing and runs on the CPU: it checks that the pipeline works
@@ -78,11 +83,17 @@ digest = _sibling("digest")
 EXPECTED = json.loads((HERE / "expected.json").read_text())
 SEEDS = (42, 43, 44)
 RUN_SEED, RUN_SPLIT = 42, "validation"
-# The two-hour runs: (name, task, method). The first is item 7 of E0-a; the others exercise every implemented method.
-SMOKE = [("t2-m7", "t2", "m7"), ("t2-m0", "t2", "m0"), ("t2-m2", "t2", "m2"), ("t2-m4", "t2", "m4"), ("t1-m7", "t1", "m7")]
+# The two-hour runs: (name, task, method). The first is item 7 of E0-a; the next three exercise every implemented
+# method on the vision task. On the text task the full method runs next to the two methods that bracket it in the
+# session of 2026-11-25 (the centralised reference and backbone satellites only): whether the full method trails
+# the backbone-only one there too says whether that is a property of the method or of the vision task.
+SMOKE = [("t2-m7", "t2", "m7"), ("t2-m0", "t2", "m0"), ("t2-m2", "t2", "m2"), ("t2-m4", "t2", "m4"),
+         ("t1-m7", "t1", "m7"), ("t1-m0", "t1", "m0"), ("t1-m2", "t1", "m2")]
 SMOKE_HOURS = 2.0
-# The day-long runs; each repeats a two-hour run, so its first rounds also show whether a run reproduces on this GPU.
-DAY = [("t2-m7-day", "t2", "m7"), ("t2-m0-day", "t2", "m0")]
+# The day-long runs, every implemented method on the vision task: two hours are too short to compare methods (the
+# backbone-only method sees a tenth of the data, which cannot show in twelve rounds). Each repeats a two-hour run,
+# so its first rounds also show whether a run reproduces on this GPU.
+DAY = [("t2-m7-day", "t2", "m7"), ("t2-m0-day", "t2", "m0"), ("t2-m2-day", "t2", "m2"), ("t2-m4-day", "t2", "m4")]
 DAY_HOURS, TINY_DAY_HOURS, DAY_FALLBACK_MINUTES = 24.0, 3.0, 10.0
 # E0-b: the settings of the status report of 2026-11-22 (Qwen2.5-1.5B, AG News, Dirichlet 0.5, beta 0.75).
 T0_BASE = {"model": "qwen", "dataset": "ag_news", "partition": "dirichlet_05", "method": "hofl", "beta": 0.75}
@@ -105,8 +116,8 @@ ABOUT = {"env": "interpreter, packages, GPU and commit of this session",
          "data": "HumAID and EuroSAT; 12 partitions: 2 tasks x 2 data variants x 3 seeds",
          "selfcheck": "correctness on ViT / EuroSAT, on Qwen / HumAID and against upstream on Qwen / AG News; models are downloaded on first use",
          "memory": "peak GPU memory of one participation at every cut: 9 measurements on Qwen, then 9 on ViT",
-         "smoke": "5 training runs of 2 simulated hours (12 rounds) each; one line per round",
-         "pilot": "2 training runs of 24 simulated hours (144 rounds) each on EuroSAT; one line per round",
+         "smoke": f"{len(SMOKE)} training runs of 2 simulated hours (12 rounds) each: EuroSAT first, then HumAID; one line per round",
+         "pilot": f"{len(DAY)} training runs of 24 simulated hours (144 rounds) each on EuroSAT; one line per round",
          "t0": "HO-FL on Qwen / AG News with the zeroth-order part on and off, seeds 43 and 44; 160 rounds each",
          "feedback": "the report of this session"}
 HEARTBEAT_S = 30   # the longest a running command stays silent on the page
@@ -151,6 +162,10 @@ class Context:
 
     def remaining(self):
         return float("inf") if self.deadline is None else self.deadline - time.time()
+
+    def limit(self, seconds):
+        """The time after which a run is ended as hanging: ``seconds`` in a session with a budget, none otherwise."""
+        return None if self.deadline is None else seconds
 
 
 def clock(seconds):
@@ -284,17 +299,25 @@ def start_stage(root, name):
     harness.write_json(Path(root) / "stages.json", stages)
 
 
+def short_run_passed(root, task, method):
+    """Whether the two-hour run of a method allows its day-long run: it completed and, for the full method, its
+    training loss went down. ``None`` when the short runs left no verdicts (they were not run, or were interrupted)."""
+    verdicts = (harness.read_json(Path(root) / "smoke.json") or {}).get("verdicts")
+    if verdicts is None:
+        return None
+    return bool((verdicts.get(f"{task}-{method}") or {}).get("passed" if method == "m7" else "completed"))
+
+
 def blocked(root, stage):
-    """The stage that keeps ``stage`` from starting (it ran in this root and did not pass), or ``None``."""
+    """The stage that keeps ``stage`` from starting (it ran in this root and did not pass), or ``None``. The
+    day-long runs are held back as a whole only when no method passed its two-hour run; otherwise each of them
+    waits for the two-hour run of its own method (``stage_pilot``)."""
     stages = stage_records(root)
     for name in REQUIRES.get(stage, ()):
         if name in stages and stages[name]["status"] != "ok":
             return name
-    if stage == "pilot":
-        verdicts = (harness.read_json(Path(root) / "smoke.json") or {}).get("verdicts")
-        if verdicts is not None and not all((verdicts.get(f"{task}-{method}") or {}).get("passed" if method == "m7" else "completed")
-                                             for _, task, method in DAY):
-            return "smoke"
+    if stage == "pilot" and all(short_run_passed(root, task, method) is False for _, task, method in DAY):
+        return "smoke"
     return None
 
 
@@ -542,7 +565,7 @@ def stage_smoke(ctx):
             statuses[name] = "SKIPPED"
             say(f"  [{name}] skipped: the budget of the session is used up")
             continue
-        statuses[name] = run_sat(ctx, name, run_fields(ctx, task, method, SMOKE_HOURS), output, timeout=1800)
+        statuses[name] = run_sat(ctx, name, run_fields(ctx, task, method, SMOKE_HOURS), output, timeout=ctx.limit(1800))
     harness.write_json(ctx.root / "smoke.json", {"statuses": statuses, "skipped": skipped,
                                                  "verdicts": {name: smoke_verdict(ctx.root / "smoke" / name) for name, _, _ in SMOKE}})
     return all(status == "COMPLETED" for status in statuses.values())
@@ -580,6 +603,11 @@ def stage_pilot(ctx):
         output = ctx.root / "pilot" / name
         estimates[name] = estimate = day_estimate_s(ctx.root / "smoke" / f"{task}-{method}", hours)
         done = (harness.read_json(output / "status.json") or {}).get("status") in harness.FINISHED
+        if not done and short_run_passed(ctx.root, task, method) is False:   # one method that fails does not hold back the others
+            skipped[name] = {"needed_min": None, "left_min": None, "why": "short"}
+            statuses[name] = "SKIPPED"
+            say(f"  [{name}] skipped: the two-hour run of the same method did not pass")
+            continue
         need = 0.0 if ctx.tiny or done else 1.25 * (estimate or 60 * DAY_FALLBACK_MINUTES)
         if ctx.remaining() < need:
             skipped[name] = {"needed_min": need / 60, "left_min": max(0.0, ctx.remaining()) / 60}
@@ -588,7 +616,7 @@ def stage_pilot(ctx):
             continue
         if estimate and not done:
             say(f"  [{name}] expected to take about {estimate / 60:.1f} min (from the two-hour run of the same method)")
-        statuses[name] = run_sat(ctx, name, run_fields(ctx, task, method, hours), output, timeout=max(1800.0, 4 * (estimate or 0.0)))
+        statuses[name] = run_sat(ctx, name, run_fields(ctx, task, method, hours), output, timeout=ctx.limit(max(1800.0, 4 * (estimate or 0.0))))
     harness.write_json(ctx.root / "pilot.json", {"statuses": statuses, "skipped": skipped, "estimates_s": estimates, "hours": hours})
     return all(status == "COMPLETED" for status in statuses.values())
 
@@ -621,7 +649,7 @@ def stage_t0(ctx):
             continue
         # A run that takes three times what it should is taken to hang; the session then goes on to its report.
         record = harness.run_training(spec["fields"], out, tree=REPO, label=spec["name"], echo=say,
-                                      stop_at=None if ctx.tiny else time.time() + 3 * 60 * T0_MINUTES[spec["mode"]])
+                                      stop_at=None if ctx.tiny or ctx.deadline is None else time.time() + 3 * 60 * T0_MINUTES[spec["mode"]])
         ok &= record["status"] == "COMPLETED"
     harness.write_json(ctx.root / "t0.json", {"skipped": skipped})
     return ok
@@ -635,16 +663,21 @@ def read_run(path, name, group, task, method, hours, started, note=None):
     path = Path(path)
     summary, meta = harness.read_json(path / "summary.json"), harness.read_json(path / "run_meta.json") or {}
     rounds, ledger, evals = harness.read_jsonl(path / "rounds.jsonl"), harness.read_jsonl(path / "ledger.jsonl"), harness.read_jsonl(path / "eval.jsonl")
-    status = (summary or {}).get("status") or meta.get("status") or (harness.read_json(path / "status.json") or {}).get("status")
+    state = harness.read_json(path / "status.json") or {}
+    status = (summary or {}).get("status") or meta.get("status") or state.get("status")
     if note is not None:
         status = "SKIPPED"
     elif status is None:
         status = "MISSING" if started else "NOT RUN"
-    elif status == "RUNNING":   # no run_meta.json: the pipeline itself was stopped while the run was going on
+    elif not meta and (status == "RUNNING" or (status == "FAILED" and "KeyboardInterrupt" in str(state.get("error")))):
+        # No record of the run's end from the pipeline: it was stopped (the cell interrupted, the runtime lost) while
+        # the run was going on. The run either never got to say so, or says that it was interrupted from outside.
         status = "INTERRUPTED"
     config = harness.read_json(path / "config.json") or {}
     run = {"name": name, "group": group, "task": task, "method": method, "hours": hours, "status": status, "note": note, "rounds": len(rounds),
-           "depth": config.get("depth"), "inputs": {key: config.get(key) for key in ("trace_sha256", "partition_sha256", "land_source")},
+           "depth": config.get("depth"), "cuts": config.get("cuts"), "server_lr": config.get("server_lr"),
+           "inputs": {key: config.get(key) for key in ("trace_sha256", "partition_sha256", "land_source")},
+           "round_loss": [row["task_loss"] for row in rounds], "channels": channel_summary(rounds),
            "verdict": smoke_verdict(path), "wall_s": (summary or {}).get("wall_s") or meta.get("wall_s"),
            "diverged_round": (summary or {}).get("diverged_round"),
            "curve": [{"round": row["round"], "sim_hours": row["sim_hours"], "accuracy": row["accuracy"], "macro_f1": row["macro_f1"], "loss": row["loss"]}
@@ -666,6 +699,7 @@ def read_run(path, name, group, task, method, hours, started, note=None):
         "invited": {kind: statistics.mean(row["invited"][kind] for row in rounds) for kind in "BHZ"},
         "skipped": {reason: sum(row["skipped"].get(reason, 0) for row in rounds) for reason in ("memory", "eclipse", "energy", "unreachable")},
         "late": sum(row["first_order_late"] for row in rounds), "moved_up": sum(row["moved_up"] for row in rounds),
+        "satellites": len({row["sid"] for row in ledger if "sid" in row}),   # how many different satellites took part: whose data the run saw
         "zo": {key: sum(row["zo_reports"][key] for row in rounds) for key in ("sent", "used", "dropped")},
         "replica_groups_max": max(row["replica_groups"] for row in rounds), "replica_difference_max": max(differences, default=0.0),
         "battery_min": {kind: min(values) if values else None for kind, values in batteries.items()},
@@ -677,6 +711,32 @@ def read_run(path, name, group, task, method, hours, started, note=None):
         "participations": (summary or {}).get("participations"), "energy_wh_per_satellite_day": (summary or {}).get("energy_wh_per_satellite_day"),
         "bytes_per_day": (summary or {}).get("bytes_per_day")})
     return run
+
+
+def channel_summary(rounds):
+    """The channel statistics of a run (``ho_fl.sat.aggregate.channel_statistics``, one entry per round) averaged
+    over its rounds, block by block: the share of the counted participants that sent a first-order / a zeroth-order
+    update, the mean norms of the two parts of the update, and the mean cosine between them with its standard error
+    over the rounds where it is defined. ``None`` for a run that was logged without them."""
+    rows = [row["channels"] for row in rounds if row.get("channels")]
+    if not rows:
+        return None
+    blocks = sorted({block for row in rows for block in row["blocks"]})
+    values = {key: {block: [] for block in blocks} for key in ("fo_share", "zo_share", "fo_norm", "zo_norm", "cos")}
+    for row in rows:
+        position = {block: index for index, block in enumerate(row["blocks"])}
+        for block in blocks:
+            index = position.get(block)   # a block nobody sent anything to in this round counts as zero
+            values["fo_share"][block].append(0.0 if index is None else row["fo_n"][index] / row["counted"])
+            values["zo_share"][block].append(0.0 if index is None else row["zo_n"][index] / row["counted"])
+            values["fo_norm"][block].append(0.0 if index is None else row["fo_norm"][index])
+            values["zo_norm"][block].append(0.0 if index is None else row["zo_norm"][index])
+            if index is not None and row["cos"][index] is not None:
+                values["cos"][block].append(row["cos"][index])
+    mean = lambda numbers: statistics.mean(numbers) if numbers else None  # noqa: E731
+    error = lambda numbers: statistics.stdev(numbers) / len(numbers) ** 0.5 if len(numbers) > 1 else None  # noqa: E731
+    return {"rounds": len(rows), "blocks": blocks, **{key: [mean(values[key][block]) for block in blocks] for key in values},
+            "cos_se": [error(values["cos"][block]) for block in blocks], "cos_rounds": [len(values["cos"][block]) for block in blocks]}
 
 
 def compare_repeat(short, day):
@@ -755,7 +815,7 @@ def collect(ctx):
             run = read_run(root / stage / name, name, group, task, method, duration, started, note)
             run["inputs_as_recorded"] = inputs_as_recorded(run, ctx.tiny)
             data["runs"].append(run)
-            if note is not None:
+            if note is not None and note.get("why") != "short":   # left out for lack of time, not because its short run failed
                 data["skipped_for_budget"].append(name)
             if run["status"] in ("FAILED", "TIMEOUT"):
                 failure(stage, name, root / stage / f"{name}.log")
@@ -793,11 +853,15 @@ def stage_feedback(ctx):
     except Exception:   # a report that cannot be written must not cost the session its record
         text = digest.fallback(data, traceback.format_exc())
     (out / "feedback_E0.md").write_text(text, encoding="utf-8")
+    try:   # what the notebook shows first; it must not cost the session its report either
+        (out / "summary_card.md").write_text(digest.card(data), encoding="utf-8")
+    except Exception:
+        (out / "summary_card.md").write_text("摘要没有生成出来，见下面的反馈报告。\n\n```\n" + traceback.format_exc() + "```\n", encoding="utf-8")
     with zipfile.ZipFile(out / "feedback_E0_bundle.zip", "w", zipfile.ZIP_DEFLATED) as bundle:
         for path in sorted(ctx.root.rglob("*")):
             relative = path.relative_to(ctx.root)
             if path.is_file() and relative.parts[0] not in ("assets", "assets-upstream") and "trees" not in relative.parts and "assets" not in relative.parts \
-                    and path.suffix in (".json", ".jsonl", ".md", ".log", ".xml") and path.name != "feedback_E0_bundle.zip" and path.stat().st_size < 20_000_000:
+                    and path.suffix in (".json", ".jsonl", ".md", ".log", ".xml", ".png") and path.name != "feedback_E0_bundle.zip" and path.stat().st_size < 20_000_000:
                 bundle.write(path, str(relative))
         for name in ("meta.json", "sanity.json"):
             path = Path(ctx.cache_dir) / "sat" / "traces" / "s1" / name

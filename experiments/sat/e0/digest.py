@@ -38,6 +38,9 @@ ROUNDS_PER_DAY, EVALUATIONS_PER_DAY = 144, 25
 REFERENCE_GPU = "RTX PRO 6000"   # Colab's G4: the timings behind every estimate of section 10.4 were measured on it
 STATES = {"ok": "完成", "attention": "有问题", "skipped": "跳过", "running": "被中断"}   # the outcome of a stage, as stages.json has it
 GROUPS = {"smoke": "short", "pilot": "day"}   # the group of runs a stage produces
+RUN_STATES = {"COMPLETED": "完成", "DIVERGED": "发散", "FAILED": "失败", "TIMEOUT": "超时", "INTERRUPTED": "被中断", "SKIPPED": "没有开始",
+              "NOT RUN": "没有运行", "MISSING": "没有结果"}
+COSINE_SIGMAS = 2.0          # a mean cosine between the two channels counts as different from zero beyond this many standard errors
 
 METHODS = {"m0": "理想中心化", "m2": "只让强星训练", "m4": "纯零阶泛洪", "m7": "完整方法"}
 TASKS = {"t1": "HumAID", "t2": "EuroSAT"}
@@ -87,6 +90,8 @@ def budget(note):
     """Why a single run was not started: it did not fit into what was left of the session's time budget."""
     if not note:
         return "没有开始"
+    if note.get("why") == "short":
+        return "同一方法的短程运行没有通过，没有开始"
     if note.get("needed_min") is None:
         return "会话的预算已经用完，没有开始"
     return f"预算不够：需要约 {note['needed_min']:.0f} 分钟，只剩 {note['left_min']:.0f} 分钟"
@@ -202,6 +207,40 @@ def estimator_facts(data):
     return facts
 
 
+def channel_facts(run):
+    """The channel statistics of a run by segment of blocks: the blocks below the lowest hybrid cut, between the
+    two hybrid cuts, above them, and the head of a vision task. Per segment the mean over its blocks of the share
+    of participants that sent a first-order / a zeroth-order update, of the norms of the two parts of the update
+    and of the cosine between them; the standard error of that cosine treats blocks and rounds as independent,
+    which is an approximation. Empty for a run logged without the statistics."""
+    stats, depth, cuts = run.get("channels"), run.get("depth"), run.get("cuts") or []
+    if not stats or not depth:
+        return []
+    edges = sorted({0, depth, *[cut for cut in cuts[1:3] if 0 < cut < depth]})
+    segments = [(low, high - 1, f"第 {low}–{high - 1} 层") for low, high in zip(edges, edges[1:])]
+    if depth in stats["blocks"]:
+        segments.append((depth, depth, "分类头"))
+    mean = lambda values: statistics.mean(values) if values else None  # noqa: E731
+    facts = []
+    for low, high, label in segments:
+        chosen = [index for index, block in enumerate(stats["blocks"]) if low <= block <= high]
+        if not chosen:
+            continue
+        cosines = [stats["cos"][index] for index in chosen if stats["cos"][index] is not None]
+        errors = [stats["cos_se"][index] for index in chosen if stats["cos"][index] is not None and stats["cos_se"][index] is not None]
+        facts.append({"label": label, "low": low, "high": high, "fo_share": mean([stats["fo_share"][index] for index in chosen]),
+                      "zo_share": mean([stats["zo_share"][index] for index in chosen]), "fo_norm": mean([stats["fo_norm"][index] for index in chosen]),
+                      "zo_norm": mean([stats["zo_norm"][index] for index in chosen]), "cos": mean(cosines),
+                      "cos_se": sum(error ** 2 for error in errors) ** 0.5 / len(errors) if errors and len(errors) == len(cosines) else None})
+    return facts
+
+
+def end_accuracies(data, task, group):
+    """The finished runs of a task in a group of runs with the accuracy of their last evaluation, highest first."""
+    runs = [run for run in data.get("runs") or [] if run["task"] == task and run["group"] == group and finished(run) and run["curve"]]
+    return sorted(((run, run["curve"][-1]["accuracy"]) for run in runs), key=lambda pair: -pair[1])
+
+
 def day_facts(data):
     """The two day-long runs on the vision task: final accuracies, when the centralised reference reaches the
     saturation level, when each reaches the target of section 9.2, and how far apart they are."""
@@ -299,7 +338,7 @@ def findings(data):
     def add(level, topic, text, action=None):
         found.append({"level": level, "topic": topic, "text": text, "action": action})
 
-    for rule in (_environment, _stage_errors, _baseline, _tests, _inputs, _selfcheck, _estimator, _memory, _runs, _run_inputs, _repeats, _cost, _day_runs, _hofl, _session):
+    for rule in (_environment, _stage_errors, _baseline, _tests, _inputs, _selfcheck, _estimator, _memory, _runs, _run_inputs, _repeats, _cost, _day_runs, _ordering, _channels, _hofl, _session):
         try:
             rule(data, add)
         except Exception as error:   # one rule that cannot read the data must not take the other findings with it
@@ -519,12 +558,14 @@ def _run_inputs(data, add):
 
 
 def _repeats(data, add):
+    same = [repeat for repeat in data.get("repeats") or [] if repeat["identical"]]
+    if same:
+        pairs = "、".join(f"{TASKS.get(repeat['task'], repeat['task'])} · {METHODS.get(repeat['method'], repeat['method'])}" for repeat in same)
+        add("good", "可复现", f"{pairs}：同一配置跑了两次（2 小时的运行和一整天运行的前 {min(repeat['rounds_compared'] for repeat in same)} 轮），每轮损失和各次评估完全相同。"
+                              "按这次的结果，卫星引擎在这块 GPU 上可以逐位复现，方法之间的配对差值不含运行间的噪声。")
     for repeat in data.get("repeats") or []:
         pair = f"{TASKS.get(repeat['task'], repeat['task'])} · {METHODS.get(repeat['method'], repeat['method'])}"
-        if repeat["identical"]:
-            add("good", "可复现", f"{pair}：同一配置跑了两次（2 小时的运行和一整天运行的前 {repeat['rounds_compared']} 轮），每轮损失和各次评估完全相同。"
-                                  "按这次的结果，卫星引擎在这块 GPU 上可以逐位复现，方法之间的配对差值不含运行间的噪声。")
-        else:
+        if not repeat["identical"]:
             add("decide", "可复现", f"{pair}：同一配置跑两次并不完全相同：前 {repeat['rounds_compared']} 轮里训练损失最大相差 "
                                     f"{small(repeat['max_loss_difference'])}，评估准确率最大相差 {small(100 * repeat['max_accuracy_difference'])} 个点。"
                                     "方法之间的配对差值里会带有这个量级的噪声。",
@@ -579,6 +620,61 @@ def _day_runs(data, add):
     add("note", "学习曲线", f"EuroSAT 一整天（单种子、步长未调、验证集）：以理想中心化最终准确率的 95%（{pct(fact['target'])}%）为目标，理想中心化{reach(fact['ideal_reaches'])}，"
                             f"完整方法{reach(fact['full_reaches'])}；理想中心化领先完整方法最多 {100 * fact['widest'][1]:+.1f} 个点（第 {fact['widest'][0]:g} 小时），"
                             f"运行结束时领先 {100 * fact['last_gap']:+.1f} 个点。方法之间的差别主要出现在哪一段时间，决定了达标时间这个指标有没有区分度。")
+
+
+def _ordering(data, add):
+    """What the methods reached on the same task after the same simulated time, as observed. Stated plainly, with
+    what keeps it from being a ranking: one seed, and a server step that has not been selected for any method."""
+    for task in ("t2", "t1"):
+        for group, title in (("short", "短程运行"), ("day", "一整天的运行")):
+            pairs = end_accuracies(data, task, group)
+            if len(pairs) < 2:
+                continue
+            text = (f"{TASKS[task]}，{title}（{pairs[0][0]['hours']:g} 个仿真小时）结束时的验证准确率：" + "，".join(f"{METHODS.get(run['method'], run['method'])} {pct(value, 1)}%" for run, value in pairs)
+                    + "。单种子，服务器步长都取 1、没有按实现说明 §10.2 为各方法选过，只能当现象看，不能据此给方法排名。")
+            full, backbone = find_run(data, {"short": f"{task}-m7", "day": f"{task}-m7-day"}[group]), find_run(data, {"short": f"{task}-m2", "day": f"{task}-m2-day"}[group])
+            if finished(full) and finished(backbone) and full["curve"] and backbone["curve"]:
+                gaps = [(point["sim_hours"], point["accuracy"] - other["accuracy"]) for point, other in zip(full["curve"], backbone["curve"]) if point["sim_hours"] > 0]
+                if gaps:
+                    behind = [hour for hour, gap in gaps if gap <= 0]
+                    if not behind:
+                        text += f"完整方法在每一次评估都高于只让强星训练，结束时领先 {100 * gaps[-1][1]:.1f} 个点。"
+                    elif behind[-1] == gaps[-1][0]:
+                        text += (f"完整方法结束时比只让强星训练低 {-100 * gaps[-1][1]:.1f} 个点" + ("，每一次评估都不高于它。" if len(behind) == len(gaps) else "，中途有过领先。")
+                                 + "只让强星训练每轮只用到强星自己的数据（全部卫星的十分之一）。")
+                    else:
+                        text += f"完整方法从第 {behind[-1]:g} 小时之后一直高于只让强星训练，结束时领先 {100 * gaps[-1][1]:.1f} 个点。"
+                if full.get("satellites") and backbone.get("satellites"):
+                    text += f"到结束时参与过训练的卫星：完整方法 {full['satellites']} 颗，只让强星训练 {backbone['satellites']} 颗（星座共 120 颗，数据按卫星划分）。"
+            add("note", "方法之间", text)
+
+
+def _channels(data, add):
+    """The full method, the lowest segment of blocks: how few participants send a first-order update there, and
+    whether the zeroth-order updates of the others point the same way."""
+    for task in ("t2", "t1"):
+        day = find_run(data, f"{task}-m7-day")
+        run = day if finished(day) and day.get("channels") else find_run(data, f"{task}-m7")
+        facts = channel_facts(run) if finished(run) else []
+        low = next((fact for fact in facts if fact["zo_share"]), None)
+        if low is None or not low["fo_norm"]:
+            continue
+        text = (f"{describe(run)}：{low['label']}里，平均只有 {100 * low['fo_share']:.0f}% 的参与者送来一阶更新，其余送来零阶更新。更新是“求和后除以全部参与者人数”，"
+                f"所以这些层的一阶步长只有“人人都送一阶”时的 {100 * low['fo_share']:.0f}%。零阶部分的范数是一阶部分的 {low['zo_norm'] / low['fo_norm']:.2f} 倍")
+        if low["cos"] is None:
+            add("note", "两条通道", text + "。")
+            continue
+        text += f"，两部分方向的余弦平均 {low['cos']:+.4f}" + (f"（标准误约 {low['cos_se']:.4f}）" if low["cos_se"] is not None else "") + "。"
+        bound = COSINE_SIGMAS * low["cos_se"] if low["cos_se"] is not None else None
+        if bound is None:
+            add("note", "两条通道", text)
+        elif low["cos"] > bound:
+            add("note", "两条通道", text + "余弦为正且超出误差范围：零阶更新带有与一阶方向一致的信息" + ("，但一致的程度很低。" if low["cos"] < 0.1 else "。"))
+        elif low["cos"] < -bound:
+            add("fix", "两条通道", text + "余弦为负且超出误差范围：零阶更新在抵消一阶更新的方向，这不应当发生。",
+                "查 `ho_fl/sat/aggregate.py` 的 `replay_zeroth_order` 和扰动步长 `mu`；先在正确性检查里看零阶标量与方向导数的符号。")
+        else:
+            add("note", "两条通道", text + "余弦与 0 分不开：按这次的数字，零阶更新在这些层里既没有加强也没有抵消一阶方向，它的主要效果是让分母变大。")
 
 
 def _hofl(data, add):
@@ -741,7 +837,7 @@ def render(data):
     if not data.get("tiny"):
         head += [f"代码 {((env.get('git') or {}).get('head') or '?')[:12]}", f"GPU {env.get('gpu_name') or '?'}", f"torch {env.get('torch') or '?'}"]
     if session.get("elapsed_hours") is not None:
-        head.append(f"会话已用 {session['elapsed_hours']:.2f} h（预算 {session.get('budget_hours', '?')} h）")
+        head.append(f"会话已用 {session['elapsed_hours']:.2f} h" + (f"（预算 {session['budget_hours']} h）" if session.get("budget_hours") else ""))
     add(" · ".join(head) + "。")
     if data.get("tiny"):
         add("\n**这是 CPU 上用随机小模型做的预演：只说明流程能跑通，下面的数字没有意义。**")
@@ -792,7 +888,7 @@ def render(data):
             add("")
     add("## 4 数据\n")
     number = 0
-    for section in (_section_time, _section_checks, _section_inputs, _section_memory, _section_estimator, _section_runs, _section_day, _section_hofl):
+    for section in (_section_time, _section_checks, _section_inputs, _section_memory, _section_estimator, _section_runs, _section_day, _section_channels, _section_hofl):
         part = []
         try:
             section(data, part.append)
@@ -1034,6 +1130,53 @@ def _section_day(data, add):
             + "；每颗卫星每天的能耗（Wh，计算 / 发送）：" + "、".join(f"{KINDS[kind]} {energy['compute'][kind]:.2f} / {energy['transmit'][kind]:.3f}" for kind in "BHZ")
             + (f"；每天的传输量：射频 {traffic['rf'] / 1e9:.2f} GB，激光 {traffic['laser'] / 1e9:.2f} GB。" if traffic else "。"))
         add("")
+
+
+def _section_channels(data, add):
+    longest = {}   # per task and method the run with the most rounds: the day-long one where there is one
+    for run in data.get("runs") or []:
+        if finished(run) and run.get("channels") and run["rounds"] > (longest.get((run["task"], run["method"])) or {"rounds": 0})["rounds"]:
+            longest[run["task"], run["method"]] = run
+    runs = [(run, channel_facts(run)) for run in longest.values()]
+    runs = [(run, facts) for run, facts in runs if any(fact["zo_share"] for fact in facts)]   # the methods that have a zeroth-order channel
+    if not runs:
+        return
+    add("### 4.0 两条通道对更新的贡献（各轮平均）\n")
+    add("每一行是一段层。“占比”是该段里送来一阶 / 零阶更新的参与者占全部参与者的比例；“范数”是更新里一阶部分、零阶部分各自的大小（求和后除以全部参与者人数）；"
+        "“余弦”是两部分方向的一致程度，0 表示不相关，括号里是标准误（近似）。\n")
+    rows = []
+    for run, facts in runs:
+        for fact in facts:
+            rows.append([describe(run), fact["label"], pct(fact["fo_share"], 0), pct(fact["zo_share"], 0), small(fact["fo_norm"]), small(fact["zo_norm"]),
+                         "无" if fact["cos"] is None else f"{fact['cos']:+.4f}" + (f"（{fact['cos_se']:.4f}）" if fact["cos_se"] is not None else "")])
+    add(table(["运行", "层", "一阶占比 %", "零阶占比 %", "一阶部分的范数", "零阶部分的范数", "余弦"], rows))
+    add("")
+
+
+def card(data):
+    """The summary of a session for the notebook page, as Markdown: where it ran, how far each step got, and one
+    row per training run. It is what one looks at first; the report has the details."""
+    env, session, stages = data.get("env") or {}, data.get("session") or {}, data.get("stages") or {}
+    rows = []
+    if data.get("tiny"):
+        rows.append(["说明", "CPU 上用随机小模型做的预演，数字没有意义"])
+    else:
+        rows += [["GPU", env.get("gpu_name") or "?"], ["PyTorch", env.get("torch") or "?"], ["代码", f"`{((env.get('git') or {}).get('head') or '?')[:12]}`"]]
+    if session.get("elapsed_hours") is not None:
+        rows.append(["会话用时", f"{session['elapsed_hours']:.2f} h"])
+    rows += [[STAGES[name], STATES.get((stages.get(name) or {}).get("status"), "没有运行") + done_of(data, name)] for name in SWITCHES]
+    lines = [table(["项", "值"], rows), ""]
+    runs = [run for run in data.get("runs") or [] if run["status"] != "NOT RUN"]
+    if runs:
+        lines.append(table(["运行", "状态", "验证准确率 %（开始 → 结束）", "训练损失（前三分之一 → 后三分之一）", "每轮秒数", "总分钟"],
+                           [[describe(run), RUN_STATES.get(run["status"], run["status"]),
+                             f"{pct(run['curve'][0]['accuracy'], 1)} → {pct(run['curve'][-1]['accuracy'], 1)}" if run.get("curve") else "无",
+                             f"{num((run.get('verdict') or {}).get('loss_first_third'), 4)} → {num((run.get('verdict') or {}).get('loss_last_third'), 4)}" if run.get("rounds") else "无",
+                             num((run.get("seconds") or {}).get("round")) if run.get("rounds") else "无", num(run["wall_s"] / 60, 1) if run.get("wall_s") else "无"]
+                            for run in runs]))
+        lines.append("")
+        lines.append("服务器步长都取 1（没有选过），单种子，在验证集上评估：这些准确率还不能用来给方法排名。")
+    return "\n".join(lines) + "\n"
 
 
 def _section_hofl(data, add):
