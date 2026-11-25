@@ -14,7 +14,9 @@ Files written to the run directory:
 
     config.json    the configuration and everything that identifies the inputs (trace, partition and git hashes)
     rounds.jsonl   one row per round; ``channels`` holds, block by block, how many participants sent a first-order
-                   and a zeroth-order update and how large the two parts of the update were (``channel_statistics``)
+                   and a zeroth-order update, how large the two parts of the update were (``channel_statistics``)
+                   and how far the first-order sum turned since the previous round (``fo_cos_prev``); ``search``
+                   holds what the step-length search of a variant with it found (``aggregate.advance``)
     ledger.jsonl   one row per participation
     eval.jsonl     one row per evaluation
     summary.json   final metrics and the status: COMPLETED, or DIVERGED when values stopped being finite
@@ -36,13 +38,13 @@ import torch
 from ..algorithms import restore
 from ..grid import git_head
 from ..io import append_jsonl, tensor_hash, write_json
-from .aggregate import Groups, channel_statistics, replica_difference, round_updates
+from .aggregate import Groups, advance, channel_statistics, first_order_turn, replica_difference, round_updates
 from .backend import SatBackend
-from .client import train_participation
+from .client import probe_step, train_participation
 from .config import CLASSES
 from .energy import Batteries
 from .links import LinkBudget
-from .methods import METHODS
+from .methods import resolve
 from .network import deliver, timeline
 from .policy import SKIP_REASONS, decide
 from .scenario import ensure_trace
@@ -107,7 +109,7 @@ def run(cfg):
     write_json(out / "status.json", status)
     started = time.perf_counter()
     try:
-        method = METHODS[cfg.method]
+        method = resolve(cfg.method, cfg.variants)
         print(f"START: {cfg.task} {cfg.method} seed {cfg.seed} | {cfg.rounds} rounds ({cfg.hours:g} simulated hours), an evaluation every "
               f"{cfg.eval_every} rounds | loading the trace, the model and the data", flush=True)
         trace = ensure_trace(cfg.trace_dir, cfg.scenario, slot_s=cfg.slot_s)
@@ -128,7 +130,11 @@ def run(cfg):
                   "data_sha256": b.data_sha256, "initial_parameter_sha256": b.initial_hash, "git": git_head(REPO),
                   "evaluation": {"split": b.eval_split, "curve_examples": len(b.curve_indices) if b.curve_indices else b.split_size(b.eval_split),
                                  "held_out_examples": len(b.held_out_indices) if b.held_out_indices else 0},
-                  "aggregation": "mean_all: sum over the participants in ascending satellite number, divided by their number",
+                  "aggregation": "mean_all: sum over the participants in ascending satellite number, divided by their number"
+                                 if method.upstream_rule else
+                                 f"first-order sum of a tensor divided by {'its senders' if method.fo_average == 'senders' else 'all participants'}; "
+                                 f"zeroth-order part with weight {method.zo_weight:g}, divided by all participants"
+                                 + ("; extended along the previous update by the step-length search of the forward-only satellites" if method.zo_search else ""),
                   "direction_seed_scheme": "stable_seed(seed, model, round, sid, 'zo_master')",
                   "lottery_seed_scheme": "stable_seed(seed, 'sat-lottery', round, sid) / 2**32",
                   "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
@@ -163,6 +169,7 @@ def run(cfg):
         wall["evaluation"] += time.perf_counter() - evaluation_started
         diverged, total_loss, energy_total = None, [], {"compute": np.zeros(roles.count), "transmit": np.zeros(roles.count)}
         bytes_total, participations, wall_training = Counter(), Counter(), 0.0
+        turned = None   # the first-order sums of the previous round, for the diagnostic of how far they turn
         for r in range(cfg.rounds):
             round_started = _clock(cuda)
             view = trace.view(r, cfg.slots_per_round)
@@ -171,10 +178,15 @@ def run(cfg):
             decisions = decide(r, view, budget, times, batteries, method, cfg, b, roles)
             participants = sorted(sid for sid, decision in decisions.items() if decision.participate)
             # Local training, each participant from the replica of its plane.
-            reports, seconds, mark = {}, {}, _clock(cuda)
+            reports, probes, seconds, mark = {}, {}, {}, _clock(cuda)
             for sid in participants:
-                reports[sid] = train_participation(b, groups.state(groups.of_plane(roles.plane(sid))), r, sid,
-                                                   decisions[sid].cut, zo=decisions[sid].zo)
+                group = groups.of_plane(roles.plane(sid))
+                # With the step-length search nobody estimates a gradient along random directions: the satellites
+                # that run a zeroth-order part (those without backpropagation) probe the previous step instead.
+                reports[sid] = train_participation(b, groups.state(group), r, sid, decisions[sid].cut,
+                                                   zo=decisions[sid].zo and not method.zo_search)
+                if method.zo_search and decisions[sid].zo and groups.step(group) is not None:
+                    probes[sid] = probe_step(b, groups.state(group), groups.step(group), reports[sid].batches)
                 finished = _clock(cuda)
                 seconds[sid], mark = finished - mark, finished
             if not _all_finite(value for report in reports.values() for value in [*report.losses, *report.delta.values()]):
@@ -183,8 +195,13 @@ def run(cfg):
             trained = _clock(cuda)
             delivery = deliver(trace, budget, times, decisions, b, method, cfg.round_s)
             delivered = time.perf_counter()
-            updates, terms = round_updates(groups, reports, delivery, b.cfg)
-            groups.apply(updates, cfg.server_lr)
+            search = None
+            if method.upstream_rule:
+                updates, terms = round_updates(groups, reports, delivery, b.cfg)
+                groups.apply(updates, cfg.server_lr)
+            else:
+                updates = None
+                terms, search = advance(groups, reports, delivery, b.cfg, method, cfg.server_lr, probes)
             if not _all_finite(tensor for group in groups.ids for tensor in groups.state(group).values()):
                 diverged = r
                 break
@@ -203,6 +220,9 @@ def run(cfg):
             # nothing of the run depends on them, so a failure to compute them is reported and the run goes on.
             try:
                 channels = channel_statistics(terms[min(terms)]) if terms else None
+                turn, turned = first_order_turn(terms[min(terms)] if terms else None, turned)
+                if channels is not None:
+                    channels["fo_cos_prev"] = [turn.get(block) for block in channels["blocks"]]
             except Exception as error:  # noqa: BLE001
                 channels = None
                 if r == 0:
@@ -247,7 +267,7 @@ def run(cfg):
                 "skipped": {reason: skipped.get(reason, 0) for reason in SKIP_REASONS},
                 "battery_min": {kind: min((batteries.share(sid) for sid in roles.members(kind)), default=None) if kind != "B" else None
                                 for kind in CLASSES},
-                "task_loss": round_loss, "channels": channels, "wall_s": logged - round_started,
+                "task_loss": round_loss, "channels": channels, "search": search, "wall_s": logged - round_started,
                 # Where the round's wall time went: local training, the network model (CPU), replay and aggregation, logging.
                 "wall_parts_s": {"train": trained - round_started, "deliver": delivered - trained,
                                  "aggregate": aggregated - delivered, "log": logged - aggregated}})
@@ -274,7 +294,7 @@ def run(cfg):
                     diverged = r
                     break
                 last = evaluated
-            del reports, updates, terms
+            del reports, probes, updates, terms
         final = None
         if diverged is None and b.final_indices != b.curve_indices:
             evaluation_started = time.perf_counter()

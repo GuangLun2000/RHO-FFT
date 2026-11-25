@@ -34,7 +34,8 @@ class Decision:
     participate: bool = False
     reason: str = None            # why an invited satellite stays out: one of SKIP_REASONS
     cut: int = None
-    zo: bool = False              # runs the zeroth-order part (false for cut 0 and for methods without it)
+    zo: bool = False              # runs a zeroth-order part and floods its report (false for cut 0, for methods
+                                  # without one and, with the step-length search, for every cut below the depth)
     tau_s: float = None           # compute time of the participation
     hops: int = 0                 # in-plane hops to the plane root
     fo_bytes: int = 0             # size of the first-order update
@@ -68,8 +69,13 @@ def decide(r, view, budget, timeline, batteries, method, cfg, backend, roles):
             decision.reason = "memory"
             continue
 
+        def runs_zo(cut):
+            # With the step-length search only a satellite without any backpropagation through the blocks spends
+            # forward passes on a zeroth-order part: its q probes per batch cost what q directions did.
+            return method.zo and cut > 0 and (not method.zo_search or cut >= task.depth)
+
         def seconds(cut, lit=sunlit):
-            return compute_time_s(kind, lit, cut, task.depth, cfg.E, cfg.q, method.zo and cut > 0, cfg.t_fwd, cfg.slowdown)
+            return compute_time_s(kind, lit, cut, task.depth, cfg.E, cfg.q, runs_zo(cut), cfg.t_fwd, cfg.slowdown)
 
         powered = seconds(cut) is not None
         if not powered and method.feasibility:
@@ -87,7 +93,7 @@ def decide(r, view, budget, timeline, batteries, method, cfg, backend, roles):
                 decision.moved_up += 1
         tau = seconds(cut, lit)
         fo_bytes = backend.fo_bytes(cut)
-        zo = method.zo and cut > 0
+        zo = runs_zo(cut)
         energy = compute_energy_j(kind, lit, tau)
         estimate = 0.0
         if orbit:

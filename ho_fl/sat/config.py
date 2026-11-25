@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from ..config import Config
+from .methods import resolve as resolve_method
 
 CLASSES = ("B", "H", "Z")   # backbone, hybrid (GPU) and forward-only (inference chip) satellites; tier 0, 1, 2
 
@@ -87,7 +88,9 @@ CLASS_SPECS = {
 }
 
 METHODS = ("m0", "m2", "m4", "m7")   # the methods implemented so far; m1, m3, m5, m6 follow in milestone P-S4
-VARIANTS = ("zonly",)                # data variant; the remaining variants of section 6.7 follow with E2
+DATA_VARIANTS = ("zonly",)           # another partition of the data (section 7.3)
+METHOD_VARIANTS = ("fo_mean", "zo_zeroed", "line")   # single switches of a method: ho_fl.sat.methods.VARIANTS
+VARIANTS = DATA_VARIANTS + METHOD_VARIANTS            # the remaining variants of section 6.7 follow with E2
 
 
 @dataclass
@@ -207,6 +210,9 @@ class SatConfig:
         unknown = [name for name in self.variants if name not in VARIANTS]
         if unknown:
             raise ValueError(f"Unsupported variant {unknown}; implemented: {', '.join(VARIANTS)}")
+        resolve_method(self.method, self.variants)   # a variant has to fit the method
+        if "line" in self.variants and self.q != 2:
+            raise ValueError("The step-length search takes its two probes per batch from q, which has to be 2")
         if self.scenario != "s1":
             raise ValueError("Training is defined on scenario s1 only; s2 is used for the topology computation")
         if self.lr == 0:

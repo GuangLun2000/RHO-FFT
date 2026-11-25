@@ -4,8 +4,12 @@
 order (directions from the shared seed, restore the starting state, a fresh AdamW, E local steps, the difference
 to the starting state), with the cut and the zeroth-order switch decided per participation by the policy instead
 of per run by the configuration. For the cuts upstream supports the two are bitwise identical; the tests check it.
+
+``probe_step`` is the zeroth-order part of a forward-only satellite under the variant ``line``: instead of an
+estimate of the gradient along random directions it returns the loss at three points along the previous update.
 """
 import torch
+import torch.nn.functional as F
 
 from ..algorithms import restore
 from ..randomness import client_directions, stable_seed
@@ -39,6 +43,36 @@ def train_participation(b, state, r, sid, cut, zo=True):
     return ClientReport(cid=sid, round=r, cut=cut, tier=CLASSES.index(kind) if kind in CLASSES else 0, delta=delta,
                         scalars=scalars, batches=batches, losses=losses, direction_master_seed=directions.master_seed,
                         zo=zo and cut > 0)
+
+
+PROBE_POINTS = (0.0, 1.0, 2.0)   # how many previous global updates further the loss is evaluated: here, one, two
+
+
+@torch.no_grad()
+def probe_step(b, state, step, batches):
+    """What a forward-only satellite measures for the step-length search (variant ``line``): the task loss of its
+    own training batches at ``state``, at ``state + step`` and at ``state + 2 * step``, where ``step`` is the
+    previous global update of its replica. Forward passes only; nothing is trained.
+
+    Returns ``{"losses": [sum over the examples at each point], "examples": their number}``; a loss may be
+    infinite or not a number when the model breaks that far out, which the aggregation reads as "do not go there".
+    On a satellite the pass at ``state`` is the one its head is trained from, so the two others are the extra cost:
+    the forward passes of q = 2 directions. Leaves ``state`` in ``b.params``.
+    """
+    losses = []
+    for scale in PROBE_POINTS:
+        for name, param in b.params.items():
+            param.copy_(state[name])
+            if scale and name in step:
+                param.add_(step[name], alpha=scale)
+        total = torch.zeros((), dtype=torch.float64, device=b.cfg.device)
+        for indices in batches:
+            batch = b.batch("train", indices)
+            logits = b.wrapper.forward(batch["input_ids"], batch["attention_mask"], token_ids=b.tokens)[:, -1].float()
+            total += F.cross_entropy(logits, batch["labels"], reduction="sum").double()
+        losses.append(total.item())
+    restore(b.params, state)
+    return {"losses": losses, "examples": sum(len(indices) for indices in batches)}
 
 
 def zo_packet(report, cfg):
