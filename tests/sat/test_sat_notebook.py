@@ -128,7 +128,7 @@ def test_a_session_runs_the_stages_in_order_and_ends_with_feedback_and_release(t
     assert [title[0] for title in titles] == list("12345") and all(namespace["STATUS"][title] == "ok" for title in titles)
     session = json.loads((colab.root / "work" / "sat" / "session.json").read_text())
     assert [step["name"] for step in session["steps"]] == ["code", "environment", "dry_run"] and all(step["gpu"] is False for step in session["steps"])
-    assert session["budget_hours"] == 1.5 and session["repo_ref"] == "sat" and len(colab.handlers) == 1
+    assert session["budget_hours"] == 1.5 and session["repo_ref"] == "main" and len(colab.handlers) == 1
 
 
 def test_a_failing_stage_does_not_stop_the_session(tmp_path, monkeypatch, capsys):

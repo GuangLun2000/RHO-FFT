@@ -41,9 +41,9 @@ brought back from Colab), `ho_fl_paper/`.
 
 ## Running the experiments on Colab
 
-Open [`notebooks/RHO-FFT_colab.ipynb`](https://colab.research.google.com/github/GuangLun2000/RHO-FFT/blob/sat/notebooks/RHO-FFT_colab.ipynb)
-in Colab, choose a GPU runtime and run all cells. It clones this repository at the branch named by `REPO_REF` (`sat`,
-so the branch has to be on GitHub; no token needed), builds the pinned environment, runs a CPU dry run and then the
+Open [`notebooks/RHO-FFT_colab.ipynb`](https://colab.research.google.com/github/GuangLun2000/RHO-FFT/blob/main/notebooks/RHO-FFT_colab.ipynb)
+in Colab, choose a GPU runtime and run all cells. It clones this repository at the branch named by `REPO_REF` (`main`;
+no token needed), builds the pinned environment, runs a CPU dry run and then the
 steps of the session (`experiments/sat/e0/e0.py`) within a time budget: tests, trace and data, correctness checks
 on the real models, memory, short and day-long runs. It ends with a feedback report
 to copy back (what the session showed and what should change), a downloadable result bundle and the release of the

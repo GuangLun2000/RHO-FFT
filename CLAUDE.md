@@ -69,7 +69,7 @@ Files directly in `ho_fl/` fall into two groups:
   deliberate and named in the report.
 - **Milestones and gates.** Work proceeds by the milestones of the brief, section 11. At a gate (G0 to G3) write the
   report and stop until the research lead confirms.
-- **Git.** Branch `sat`. Small commits; commit messages, code and comments in English. Do not push or rewrite
+- **Git.** One branch, `main` (the work branch `sat` was merged and removed on 2026-11-25). Small commits; commit messages, code and comments in English. Do not push or rewrite
   commits without the research lead's say-so. Commit files by path: the working tree holds untracked local documents.
 - **Reports.** One per milestone, `docs/reports/P-S{n}.md`, in Chinese, in the format of the brief, section 12.
   Describe configurations in plain words; a code such as M7 or E2 is a label, not an explanation.

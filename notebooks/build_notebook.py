@@ -58,7 +58,7 @@ code(r'''
 #@title Parameters { display-mode: "form" }
 # The code is read from GitHub only (a public repository: no token, no Colab secrets).
 REPO_URL = "https://github.com/GuangLun2000/RHO-FFT.git"  #@param {type:"string"}
-REPO_REF = "sat"  #@param {type:"string"}
+REPO_REF = "main"  #@param {type:"string"}
 
 # Wall-clock budget of this notebook, in hours: no new run starts after it, and a command that is still running
 # half an hour later is stopped so that the feedback can be written and the GPU released.
