@@ -169,10 +169,10 @@ def stream(ctx, command, log_path, label=None, show=None, timeout=None, tail=Tru
                 state["shown"] = time.monotonic()
                 say(f"{prefix}... running, {clock(time.monotonic() - started)} so far" + (f" | last line: {state['last'][:110]}" if state["last"] else ""))
 
-    threading.Thread(target=heartbeat, daemon=True).start()
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(command, cwd=str(REPO), env={**harness.tree_environment(REPO), "PYTHONUTF8": "1"}, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1)
+        threading.Thread(target=heartbeat, daemon=True).start()
 
         def end():
             ended.append(True)
@@ -196,6 +196,9 @@ def stream(ctx, command, log_path, label=None, show=None, timeout=None, tail=Tru
             finished.set()
             if timer:
                 timer.cancel()
+            if process.poll() is None:   # reading its output failed: the command must not outlive this call
+                process.kill()
+                process.wait()
     if ended:
         say(f"    stopped after {timeout / 60:.0f} minutes without finishing; see {log_path}")
     elif code != 0 and tail:

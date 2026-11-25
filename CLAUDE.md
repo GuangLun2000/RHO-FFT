@@ -105,6 +105,10 @@ Code, then a Colab session, then the feedback report, then code again (`experime
 - **When the lead pastes a report back.** Save it under `colab_results_feedback/` (local, untracked) with the date,
   replace the "未运行" entries of the milestone report with its numbers, act on its findings, and adjust pipeline and
   notebook for the next session.
+- **What a session prints.** The lead follows a session on the Colab page, so the page has to say where it is at
+  any moment: every stage states what it is about to do and how long it took, a training run prints a line per
+  round with the time left, and a command that is silent for 30 seconds gets a line from the pipeline (`stream` in
+  `e0.py`). Conclusions and progress go to the page; tracebacks and tables of passing checks go to the logs.
 - **The notebook.** `notebooks/RHO-FFT_colab.ipynb` is generated: edit `notebooks/build_notebook.py`, run it, and
   let `tests/sat/test_sat_notebook.py` execute the cells with every external effect stubbed. Never edit the `.ipynb` by
   hand. The notebook must always reach its last cell: steps record failures instead of raising, and the GPU is

@@ -372,7 +372,7 @@ if sat("env") != 0:
 md(r'''
 ## B. 预演（CPU，几分钟）
 
-用随机初始化的小模型和合成数据，把本次会话的每一步（轨迹、数据划分、正确性检查、显存标定、短程与一整天的运行、反馈报告）完整走一遍。它只检查流程在这个环境里能不能跑通，数字没有意义。页面上每进入一个阶段打印一行（带已用秒数），最后一行是结果；正常是三到五分钟，十分钟还没结束会被停掉并按失败处理。失败时打印最后 60 行，notebook 停下并释放 GPU。预演通过过一次、流水线没有再改动时，可以用 `RUN_DRY_RUN` 关掉。
+用随机初始化的小模型和合成数据，把本次会话的每一步（轨迹、数据划分、正确性检查、显存标定、短程与一整天的运行、反馈报告）完整走一遍。它只检查流程在这个环境里能不能跑通，数字没有意义。页面上每进入一个阶段打印一行（带已用秒数），最后一行是结果；正常是三到五分钟，十五分钟还没结束会被停掉并按失败处理。失败时打印最后 60 行，notebook 停下并释放 GPU。预演通过过一次、流水线没有再改动时，可以用 `RUN_DRY_RUN` 关掉。
 ''')
 
 code(r'''
@@ -382,8 +382,8 @@ if RUN_DRY_RUN:
     started, lines = time.time(), []
     process = subprocess.Popen([PY, "experiments/sat/e0/e0.py", "all", "--tiny", "--quiet", "--root", TINY], cwd=REPO_DIR, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True)
-    # It should take three to five minutes; one that has not finished after ten is stopped, and counts as failed.
-    timer = threading.Timer(600, lambda: os.killpg(process.pid, signal.SIGKILL))
+    # It should take three to five minutes; one that has not finished after fifteen is stopped, and counts as failed.
+    timer = threading.Timer(900, lambda: os.killpg(process.pid, signal.SIGKILL))
     timer.daemon = True
     timer.start()
     try:
@@ -399,7 +399,7 @@ if RUN_DRY_RUN:
     print(f"- every step of this session on tiny models: {STATUS['dry run']} ({time.time() - started:.0f} s)", flush=True)
     if not ok:
         print("\n".join(lines[-60:]))
-        stop("The dry run failed or did not finish within ten minutes. Nothing has been run on the GPU yet; send the output above back.")
+        stop("The dry run failed or did not finish within fifteen minutes. Nothing has been run on the GPU yet; send the output above back.")
     print(f"{hours_left():.2f} h of budget left")
 else:
     print("B · Dry run: switched off")
