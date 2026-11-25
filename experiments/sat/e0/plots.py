@@ -130,10 +130,13 @@ def curve_figures(data):
             logged = [run for run in chosen if len(run.get("round_loss") or []) >= 24]
             if logged:
                 per_hour = max(1.0, len(logged[0]["round_loss"]) / hours)
-                figure = line_chart(where, "Training loss of the round (mean over the participants)",
+                figure = line_chart(where, "Training loss (mean over participants)",
                                     [(run["method"], [(index + 1) / per_hour for index in range(len(run["round_loss"]))], run["round_loss"]) for run in logged],
                                     "{:.3f}", markers=False)
-                result.append((f"loss_{task}_{group}", f"{TASK_TITLES.get(task, task)} · {GROUP_TITLES[group]}：每轮的训练损失", figure))
+                # Each method averages over its own participants, on their own data: the curves show that a run learns,
+                # they do not rank the methods (validation accuracy does).
+                result.append((f"loss_{task}_{group}", f"{TASK_TITLES.get(task, task)} · {GROUP_TITLES[group]}：每轮的训练损失"
+                               "（各方法的参与者不同，曲线之间不能直接比较）", figure))
     return result
 
 
