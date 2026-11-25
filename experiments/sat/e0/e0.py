@@ -94,7 +94,7 @@ BASELINE_PATHS = ("ho_fl", ":(exclude)ho_fl/sat", "pyproject.toml", "experiments
 # What each stage is about to do, printed under its heading: the page says what is running before it runs.
 ABOUT = {"env": "interpreter, packages, GPU and commit of this session",
          "baseline": "is upstream HO-FL unchanged: its three smoke configurations on the upstream commit and on this code",
-         "tests": "the CPU test suite in this environment (about 4 minutes; one line per 72 tests)",
+         "tests": "the CPU test suite in this environment (about 4 minutes; one line per test file as it completes)",
          "trace": "24 hours of the 120-satellite constellation, compared with the reference values of the brief",
          "data": "HumAID and EuroSAT; 12 partitions: 2 tasks x 2 data variants x 3 seeds",
          "selfcheck": "correctness on ViT / EuroSAT, on Qwen / HumAID and against upstream on Qwen / AG News; models are downloaded on first use",
@@ -404,16 +404,17 @@ def read_junit(path):
 
 def stage_tests(ctx):
     cache = ["-o", f"cache_dir={ctx.root / 'pytest-cache'}"]   # outside the source tree; the repeat below reads it
-    # The page shows the result line and the names of failed tests; their tracebacks are in the log and in the report.
+    # Without -q pytest ends a line per test file, so the page names the file just completed and the share done;
+    # besides those it shows the result line and the names of failed tests. Tracebacks are in the log and the report.
     show = lambda line: line.startswith("FAILED ") or line.rstrip().endswith("%]") or (" in " in line and (" passed" in line or " failed" in line))  # noqa: E731
-    code, wall, _ = stream(ctx, [ctx.python, "-m", "pytest", "-q", *cache, f"--junitxml={ctx.root / 'pytest.xml'}"], ctx.root / "pytest.log", show=show, tail=False)
+    code, wall, _ = stream(ctx, [ctx.python, "-m", "pytest", *cache, f"--junitxml={ctx.root / 'pytest.xml'}"], ctx.root / "pytest.log", show=show, tail=False)
     counts, failed = read_junit(ctx.root / "pytest.xml")
     flaky = []
     if code != 0 and 0 < len(failed) <= 10:
         # A test that fails once and passes when repeated is an unreliable test, not a defect of the code it tests.
         # It is reported as something to fix, but it does not cost the session its GPU stages.
         say(f"    {len(failed)} test(s) failed; running them once more")
-        again, extra, _ = stream(ctx, [ctx.python, "-m", "pytest", "-q", "--last-failed", "--last-failed-no-failures", "none", *cache,
+        again, extra, _ = stream(ctx, [ctx.python, "-m", "pytest", "--last-failed", "--last-failed-no-failures", "none", *cache,
                                        f"--junitxml={ctx.root / 'pytest-repeat.xml'}"], ctx.root / "pytest-repeat.log", show=show, tail=False)
         wall += extra
         _, still = read_junit(ctx.root / "pytest-repeat.xml")
