@@ -7,14 +7,13 @@ work on any machine with a CUDA GPU.
 ```bash
 python experiments/sat/e0/e0.py env baseline tests trace data --root outputs/sat/e0   # the baseline needs the GPU, the rest does not
 python experiments/sat/e0/e0.py selfcheck memory smoke pilot --root outputs/sat/e0    # about 30 minutes of GPU time
-python experiments/sat/e0/e0.py t0 --root outputs/sat/e0 --budget-hours 1             # four HO-FL runs, about 40 minutes
 python experiments/sat/e0/e0.py feedback --root outputs/sat/e0                        # feedback_E0.md, .json and a zip
 python experiments/sat/e0/e0.py all --tiny --root outputs/sat/e0-tiny                 # CPU dry run, about 4 minutes
 ```
 
 ## What the session is for
 
-Every stage exists for one of seven questions. Cheap stages that can invalidate the rest come first.
+Every stage exists for one of six questions. Cheap stages that can invalidate the rest come first.
 
 | Question | Stages | What the answer decides |
 | --- | --- | --- |
@@ -24,14 +23,17 @@ Every stage exists for one of seven questions. Cheap stages that can invalidate 
 | What does a run cost? | timings of `smoke` and `pilot` | The GPU budget of E1 to E4; whether the replay needs optimising first |
 | Does the model learn, is the zeroth-order estimate faithful? | `smoke`, the diagnostic of `selfcheck` | Whether learning rate and perturbation radius are sane on the new tasks |
 | Does EuroSAT saturate, is a day the right horizon? | `pilot` | Dataset or main metric of the vision task (gate G3), before its experiments run |
-| How much does the zeroth-order part matter in HO-FL? | `t0` | How the paper describes it; independent of the satellite code |
+
+A seventh question, how much the zeroth-order part matters in upstream HO-FL (E0-b), was answered by the stage `t0`
+on 2026-11-24 (results in the milestone report P-S3). The stage stays callable but is no longer part of `all` or of
+the notebook.
 
 ## Stages
 
 | Stage | What it does | Item of E0 |
 | --- | --- | --- |
 | `env` | Interpreter, packages, GPU and git state | |
-| `baseline` | `experiments/p0/p0.py env golden regress feedback`: HO-FL, FedAvg and DeComFL on this code against the upstream commit, and `ho-fl-replay` | E0-a 1 |
+| `baseline` | `experiments/p0/p0.py env golden regress feedback`: HO-FL, FedAvg and DeComFL on this code against the upstream commit, and `ho-fl-replay`. Not repeated while `verified.json` covers the code: it records the commit, GPU and PyTorch the regression passed on, and the stage runs again only when a file outside `ho_fl/sat/` that upstream HO-FL executes has changed since, or the GPU or PyTorch differ | E0-a 1 |
 | `tests` | The CPU test suite: upstream tests and `tests/sat` | E0-a 1 |
 | `trace` | Builds the S1 trace (`ho-fl-sat-trace`) and compares 19 statistics with appendix A of the brief | E0-a 6 |
 | `data` | Downloads HumAID (per-event release) and EuroSAT, builds the partitions of seeds 42, 43, 44 in the base and the forward-only ("zonly") variant, prints the statistics of seed 42 and all partition hashes | |
@@ -40,7 +42,7 @@ Every stage exists for one of seven questions. Cheap stages that can invalidate 
 | `smoke` | Two simulated hours of the full method on both tasks and of the three other implemented methods on EuroSAT | E0-a 7 |
 | `pilot` | A whole simulated day of the full method and of the centralised reference on EuroSAT. Not a result (server step 1, one seed, validation split): it shows whether EuroSAT saturates, what a full run costs and, because its first twelve rounds repeat a `smoke` run, whether a run reproduces on the GPU | diagnostic |
 | `t0` | `ho-fl-train` on Qwen / AG News with the zeroth-order part on and off, seeds 43 and 44 | E0-b |
-| `feedback` | The report of `digest.py`: state of the gate, answers to the seven questions, findings with the file to change or the decision to take, the numbers, the end of every failed log, what to run next | |
+| `feedback` | The report of `digest.py`: state of the gate, answers to the questions, findings with the file to change or the decision to take, the numbers, the end of every failed log, what to run next | |
 
 A stage does not start when a stage it builds on ran and did not pass (`REQUIRES` in `e0.py`; `--force` overrides):
 `selfcheck` and `memory` need `baseline` and `tests`; `smoke` and `pilot` also need `trace`, `data` and `selfcheck`;
@@ -55,6 +57,14 @@ only reads the dictionary `collect` builds, so its rules are tested without runn
 should change; the text names the file), `decide` (a choice that affects the experiments, for the research lead),
 `note` and `good`. The thresholds behind the findings are the constants at the top of `digest.py`; each cites the
 section of the brief it comes from.
+
+## What a stage prints
+
+The page shows conclusions, not process: the result line of the tests and the names of failed ones, the verdict of
+the trace comparison and any statistic that disagrees, how many partitions carry the recorded hash, how many checks
+passed and every check that failed, the memory states, and of a training run its evaluations in the first two
+simulated hours and every fourth hour after that. Everything else is in the logs under `<root>`, which the result
+bundle holds; the report quotes the end of the log of whatever failed.
 
 ## Notes
 

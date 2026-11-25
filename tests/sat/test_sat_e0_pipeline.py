@@ -97,7 +97,7 @@ def test_a_clean_session_passes_the_gate():
     text = digest.render(data)
     assert "**关卡 G0：通过。**" in text and "必须先修的 0 项，建议调整的 0 项，需要你决定的 0 项" in text
     assert "代码 abcdef123456 · GPU G4 · torch 2.7.1+cu128 · 会话已用 1.30 h（预算 2.5 h）" in text
-    assert "关卡 G0 的七项都通过了" in text and "名称对照" in text and "## 5 失败与异常（日志末尾）\n\n无。" in text
+    assert "关卡 G0 的七项检查都通过了" in text and "名称对照" in text and "## 5 失败与异常（日志末尾）\n\n无。" in text
     # The seven questions are answered in order, each from the numbers of the session.
     answers = [answer for _, answer in digest.answers(data, rows)]
     assert answers[0].startswith("没有。") and "CPU 测试 400 项，0 项没有通过" in answers[0]
@@ -198,7 +198,9 @@ def test_cost_saturation_reproducibility_and_the_seeds():
     text = digest.render(session())
     assert "| 43 | 本次会话 | 86.00 | 85.80 | +0.20 |" in text and "| 42 | 11-21 的会话 | 85.99 | 85.95 | +0.04 |" in text
     assert "零阶的作用成立，幅度远小于作者报告的值" in text
-    assert digest.hofl_facts(session(t0=[])) is None and "未运行或种子不够" in digest.render(session(t0=[]))
+    # The HO-FL runs are no longer part of the session: without them the report has six answers and no table for them.
+    assert digest.hofl_facts(session(t0=[])) is None and "HO-FL 的零阶开与关" not in digest.render(session(t0=[]))
+    assert len(digest.answers(session(t0=[]), digest.checklist(session(t0=[])))) == 6 and len(digest.answers(session(), digest.checklist(session()))) == 7
     mixed = session(t0=[{**entry, "accuracy": 0.8590 if entry["name"] == "qwen-zoon-s44" else entry["accuracy"]} for entry in session()["t0"]])
     assert digest.hofl_facts(mixed)["gaps"][-1] == pytest.approx(-0.11) and digest.hofl_facts(mixed)["holds"] is False
     assert "不成立：差距在种子间的波动之内" in digest.render(mixed)
@@ -216,7 +218,7 @@ def test_what_did_not_run_and_what_comes_next():
                       failures=[{"stage": "selfcheck", "name": "t1", "log": "selfcheck/t1.log", "tail": "RuntimeError: CUDA out of memory"}])
     text = digest.render(blocked)
     assert "**关卡 G0：未通过。** 清单第 4 项没有通过" in text and "- 短程运行：跳过（正确性检查没有通过）" in text
-    assert "- HO-FL 零阶开关：没有打开，或会话在它之前结束" in text and "| 短程运行 | 跳过 | 0.0 | 正确性检查没有通过 |" in text
+    assert "HO-FL 零阶开关" not in text and "| 短程运行 | 跳过 | 0.0 | 正确性检查没有通过 |" in text
     assert "**正确性检查 t1**（`selfcheck/t1.log`）" in text and "RuntimeError: CUDA out of memory" in text
     assert "重跑时可以关掉已经完成、与要改的代码无关的步骤：`RUN_MEMORY`（显存标定）" in text
     # Runs that did not fit into the budget are listed with what they needed.
@@ -228,7 +230,7 @@ def test_what_did_not_run_and_what_comes_next():
     del stages["smoke"], stages["pilot"]
     interim = digest.render(session(stages=stages, t0=[], pending=["t0"]))
     assert "**这是中期报告：HO-FL 零阶开关还没有开始" in interim and "- HO-FL 零阶开关：尚未开始（中期报告）" in interim
-    assert "还没有开始，见会话最后的完整报告" in interim and "- 短程运行：没有打开，或会话在它之前结束" in interim
+    assert "- 短程运行：没有打开，或会话在它之前结束" in interim
     # The dry run says that its numbers mean nothing and judges nothing about the environment.
     tiny = digest.render(session(tiny=True))
     assert "下面的数字没有意义" in tiny and "PyTorch 是" not in tiny
@@ -322,7 +324,7 @@ def test_a_test_that_passes_when_repeated_is_reported_but_does_not_stop_the_sess
         calls, root = [], tmp_path / f"root{len(list(tmp_path.iterdir()))}"
         root.mkdir()
 
-        def stream(ctx, command, log_path, label=None, show=None, timeout=None):
+        def stream(ctx, command, log_path, label=None, show=None, timeout=None, tail=True):
             failures = outcomes[len(calls)]
             calls.append(command)
             target = next(part.split("=", 1)[1] for part in command if part.startswith("--junitxml="))
@@ -414,7 +416,7 @@ def test_the_report_survives_its_own_errors(monkeypatch):
     text = digest.render(session())
     assert "这一小节生成时出错：KeyError('missing')" in text and "### 4.5 零阶估计的保真度" in text and "**关卡 G0：通过。**" in text
     monkeypatch.setattr(digest, "answers", lambda data, rows: 1 / 0)
-    assert "七个问题的答案生成时出错" in digest.render(session())
+    assert "各个问题的答案生成时出错" in digest.render(session())
     # The last resort when nothing can be rendered: the error and the plain state of every stage.
     plain = digest.fallback(session(), "Traceback ...\nZeroDivisionError: division by zero")
     assert "报告生成出错" in plain and "ZeroDivisionError" in plain and "- selfcheck: ok，1.0 分钟" in plain and "- run t2-m7: COMPLETED" in plain
@@ -431,4 +433,38 @@ def test_expected_hashes_and_run_lists():
     reference = json.loads((REPO / e0.T0_REFERENCE["file"]).read_text())["runs"]
     assert (reference[e0.T0_REFERENCE["on"]]["final_accuracy_pct"], reference[e0.T0_REFERENCE["off"]]["final_accuracy_pct"]) == (85.99, 85.95)
     assert set(e0.REQUIRES) <= set(e0.STAGES) and all(set(needs) <= set(e0.STAGES) for needs in e0.REQUIRES.values())
-    assert set(digest.SWITCHES) | {"env", "feedback"} == set(e0.STAGES) == set(digest.STAGES)
+    # The HO-FL runs stay callable but are not part of a session any more, so no switch of the notebook belongs to them.
+    assert set(digest.SWITCHES) | {"env", "feedback", "t0"} == set(e0.STAGES) == set(digest.STAGES)
+    assert e0.SESSION == tuple(stage for stage in e0.STAGES if stage != "t0")
+
+
+def test_the_baseline_regression_is_not_repeated_while_its_record_stands(tmp_path, monkeypatch, capsys):
+    record = e0.VERIFIED["baseline"]
+    assert set(record["configs"]) == {"hofl", "fedavg", "decomfl"} and all(entry["verdict"] == "PASS_BITWISE" for entry in record["configs"].values())
+    calls, changed = [], [False]
+    monkeypatch.setattr(e0.subprocess, "run", lambda command, **options: (calls.append(command), types.SimpleNamespace(returncode=int(changed[0])))[1])
+    ctx = types.SimpleNamespace(root=tmp_path, tiny=False)
+    assert e0.baseline_verified(ctx) is None and calls == []            # no record of the environment: run it
+    (tmp_path / "env.json").write_text(json.dumps({"gpu_name": record["gpu_name"], "torch": record["torch"]}))
+    assert e0.baseline_verified(ctx) == record
+    assert calls[0][3:6] == ["diff", "--quiet", record["commit"]] and list(calls[0][-4:]) == list(e0.BASELINE_PATHS)   # against the working tree
+    assert e0.stage_baseline(ctx) is True and "is not repeated" in capsys.readouterr().out
+    written = json.loads((tmp_path / "baseline.json").read_text())
+    assert written["status"] == "PASSED" and written["reused"]["commit"] == record["commit"] and written["replay"]["verdict"] == "PASS"
+    data = session(baseline=written)
+    assert digest.gate(digest.checklist(data)) == ("PASS", []) and "此后 HO-FL 的代码没有改动，本次不重跑" in digest.checklist(data)[1][3]
+    assert "所以没有重跑" in digest.render(data)
+    changed[0] = True                                                   # the code of upstream HO-FL changed: run it
+    assert e0.baseline_verified(ctx) is None
+    changed[0] = False
+    (tmp_path / "env.json").write_text(json.dumps({"gpu_name": "another GPU", "torch": record["torch"]}))
+    assert e0.baseline_verified(ctx) is None                            # another GPU: run it
+    assert e0.baseline_verified(types.SimpleNamespace(root=tmp_path, tiny=True)) == record   # a dry run only looks at the code
+
+
+def test_what_the_page_shows_of_a_stage():
+    lines = ["EVAL   0.0 h (round 0/144) | x", "EVAL   2.0 h (round 12/144) | x", "EVAL   3.0 h (round 18/144) | x", "EVAL   8.0 h (round 48/144) | x",
+             "round 18/144 (3.0 h) | x", "COMPLETED: t2 m7 seed 42", "DIVERGED: t2 m7", "something else"]
+    assert [e0.progress(line) for line in lines] == [True, True, False, True, False, True, True, False]
+    assert e0.verdicts("Self-check of task t2 (vit)") and e0.verdicts("15 of 15 checks passed") and e0.verdicts("| 4 | a check | FAIL | detail |")
+    assert not e0.verdicts("| 4 | a check | pass | detail |") and not e0.verdicts("| 3 | 0.01 (configured) | 64 | 0.99 | 1.00 | 0.95 |")
