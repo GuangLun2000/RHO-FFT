@@ -274,6 +274,16 @@ def record_stage(root, name, status, wall_s, blocked_by=None, error=None):
     harness.write_json(Path(root) / "stages.json", stages)
 
 
+def start_stage(root, name):
+    """Mark a stage as started. One that never gets to ``record_stage`` (the cell was stopped by hand, the runtime
+    was lost) then reads as interrupted, and what it had finished is still reported under its name."""
+    stages = stage_records(root)
+    previous = stages.get(name) or {}
+    stages[name] = {"status": "running", "wall_s": previous.get("wall_s", 0.0), "calls": previous.get("calls", 0), "blocked_by": None,
+                    "error": None, "started_at": now()}
+    harness.write_json(Path(root) / "stages.json", stages)
+
+
 def blocked(root, stage):
     """The stage that keeps ``stage`` from starting (it ran in this root and did not pass), or ``None``."""
     stages = stage_records(root)
@@ -523,10 +533,18 @@ def stage_memory(ctx):
 
 
 def stage_smoke(ctx):
-    statuses = {}
+    statuses, skipped = {}, {}
     for name, task, method in SMOKE:
-        statuses[name] = run_sat(ctx, name, run_fields(ctx, task, method, SMOKE_HOURS), ctx.root / "smoke" / name, timeout=1800)
-    harness.write_json(ctx.root / "smoke.json", {"statuses": statuses, "verdicts": {name: smoke_verdict(ctx.root / "smoke" / name) for name, _, _ in SMOKE}})
+        output = ctx.root / "smoke" / name
+        done = (harness.read_json(output / "status.json") or {}).get("status") in harness.FINISHED
+        if not done and not ctx.tiny and ctx.remaining() <= 0:   # the budget of the session is used up: no new run starts
+            skipped[name] = {"needed_min": None, "left_min": 0.0}
+            statuses[name] = "SKIPPED"
+            say(f"  [{name}] skipped: the budget of the session is used up")
+            continue
+        statuses[name] = run_sat(ctx, name, run_fields(ctx, task, method, SMOKE_HOURS), output, timeout=1800)
+    harness.write_json(ctx.root / "smoke.json", {"statuses": statuses, "skipped": skipped,
+                                                 "verdicts": {name: smoke_verdict(ctx.root / "smoke" / name) for name, _, _ in SMOKE}})
     return all(status == "COMPLETED" for status in statuses.values())
 
 
@@ -622,8 +640,8 @@ def read_run(path, name, group, task, method, hours, started, note=None):
         status = "SKIPPED"
     elif status is None:
         status = "MISSING" if started else "NOT RUN"
-    elif status == "RUNNING":
-        status = "FAILED"
+    elif status == "RUNNING":   # no run_meta.json: the pipeline itself was stopped while the run was going on
+        status = "INTERRUPTED"
     config = harness.read_json(path / "config.json") or {}
     run = {"name": name, "group": group, "task": task, "method": method, "hours": hours, "status": status, "note": note, "rounds": len(rounds),
            "depth": config.get("depth"), "inputs": {key: config.get(key) for key in ("trace_sha256", "partition_sha256", "land_source")},
@@ -727,9 +745,11 @@ def collect(ctx):
             failure("memory", task, root / "memory" / f"{task}.log")
     pilot = harness.read_json(root / "pilot.json") or {}
     hours = pilot.get("hours") or (TINY_DAY_HOURS if ctx.tiny else DAY_HOURS)
-    groups = [("short", "smoke", SMOKE, SMOKE_HOURS, {}), ("day", "pilot", DAY, hours, pilot.get("skipped") or {})]
+    groups = [("short", "smoke", SMOKE, SMOKE_HOURS, (harness.read_json(root / "smoke.json") or {}).get("skipped") or {}),
+              ("day", "pilot", DAY, hours, pilot.get("skipped") or {})]
     for group, stage, specs, duration, skipped in groups:
-        started = stage in stages and stages[stage]["status"] != "skipped"
+        # Only a stage that came to its end went through all its runs: one without a result then is missing, not just not run.
+        started = (stages.get(stage) or {}).get("status") in ("ok", "attention")
         for name, task, method in specs:
             note = skipped.get(name)
             run = read_run(root / stage / name, name, group, task, method, duration, started, note)
@@ -822,6 +842,7 @@ def main(argv=None):
             results[stage] = "skipped"
         else:
             say(f"  {ABOUT[stage]}")
+            start_stage(ctx.root, stage)
             try:
                 results[stage] = "ok" if functions[stage](ctx) else "attention"
             except Exception:   # a stage that breaks is recorded like one that fails: what builds on it is skipped, the report shows why

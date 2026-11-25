@@ -55,7 +55,8 @@ the notebook.
 A stage does not start when a stage it builds on ran and did not pass (`REQUIRES` in `e0.py`; `--force` overrides):
 `selfcheck` and `memory` need `baseline` and `tests`; `smoke` and `pilot` also need `trace`, `data` and `selfcheck`;
 `pilot` needs the two-hour run of the same method to have passed; `t0` needs `baseline` only. A stage that never ran
-blocks nothing. Outcomes and wall times are in `<root>/stages.json`.
+blocks nothing. Outcomes and wall times are in `<root>/stages.json`; a stage is marked `running` when it starts, so one
+that was stopped by hand reads as interrupted in the report, and a run it was in the middle of as `INTERRUPTED`.
 
 ## The feedback report
 
@@ -93,6 +94,9 @@ holds; the report quotes the end of the log of whatever failed.
   The latter spelled the averaging rule as "first-order reports only, divided by K"; with the zeroth-order part off
   that is arithmetically the default rule, and gives the same parameters (checked on the tiny model).
 - Re-running a stage reuses finished runs. An unfinished run is moved aside to `<run>.stale-N` and repeated.
+- `smoke` starts no new run once the budget is used up. The estimates of the brief (section 10.4) were measured on
+  Colab's G4; on any other GPU the report gives the measured times with the name of the GPU and derives no budget
+  from them.
 - `pilot` and `t0` start a run only if its expected duration fits the remaining budget (`--budget-hours` or
   `--deadline`); `pilot` takes the expectation from the timings of the `smoke` run of the same method. A run that
   takes several times what it should is stopped, so that the session reaches its report.

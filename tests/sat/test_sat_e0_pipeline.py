@@ -53,7 +53,7 @@ def day(start, end):
 def session(**changes):
     stages = {name: {"status": "ok", "wall_s": 60.0, "calls": 1, "blocked_by": None} for name in e0.STAGES}
     data = {"generated_at": "2026-11-25T10:00:00+00:00", "tiny": False, "stages": stages,
-            "env": {"gpu_name": "G4", "torch": "2.7.1+cu128", "git": {"head": "abcdef123456", "dirty": False}, "land_mask_installed": True},
+            "env": {"gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition", "torch": "2.7.1+cu128", "git": {"head": "abcdef123456", "dirty": False}, "land_mask_installed": True},
             "session": {"started_at": 0.0, "elapsed_hours": 1.3, "budget_hours": 2.5,
                         "steps": [{"name": "environment", "minutes": 2.0, "status": "ok", "gpu": False}, {"name": "dry_run", "minutes": 4.0, "status": "ok", "gpu": False}]},
             "baseline": {"status": "PASSED", "returncode": 0, "golden_mode": "bitwise", "replay": {"verdict": "PASS", "max_abs_error": 3.6e-12, "comparisons": 672},
@@ -96,7 +96,7 @@ def test_a_clean_session_passes_the_gate():
     assert not {level for level, _ in levels(data)} & {"block", "fix", "decide"}
     text = digest.render(data)
     assert "**关卡 G0：通过。**" in text and "必须先修的 0 项，建议调整的 0 项，需要你决定的 0 项" in text
-    assert "代码 abcdef123456 · GPU G4 · torch 2.7.1+cu128 · 会话已用 1.30 h（预算 2.5 h）" in text
+    assert "代码 abcdef123456 · GPU NVIDIA RTX PRO 6000 Blackwell Server Edition · torch 2.7.1+cu128 · 会话已用 1.30 h（预算 2.5 h）" in text
     assert "关卡 G0 的七项检查都通过了" in text and "名称对照" in text and "## 5 失败与异常（日志末尾）\n\n无。" in text
     # The seven questions are answered in order, each from the numbers of the session.
     answers = [answer for _, answer in digest.answers(data, rows)]
@@ -281,9 +281,65 @@ def test_a_session_of_measurements_and_runs_has_no_checklist_and_judges_no_gate(
     late = experiments_only()
     late["stages"]["pilot"] = {"status": "skipped", "wall_s": 0.0, "calls": 1, "blocked_by": "smoke"}
     text = digest.render(late)
-    assert "一整天的运行跳过。" in text and "- 一整天的运行：跳过（短程运行没有通过）" in text and "一整天的运行没有完成（原因见上）。补跑时只打开对应的开关" in text
+    assert "一整天的运行跳过（2 次运行里 2 次跑完）。" in text and "- 一整天的运行：跳过（短程运行没有通过）" in text and "一整天的运行没有完成（原因见上）。补跑时只打开对应的开关" in text
     del late["stages"]["memory"]
     assert "显存标定没有运行，" in digest.render(late) and "- 显存标定：没有打开，或会话在它之前结束" in digest.render(late)
+
+
+def test_a_session_stopped_by_hand_on_another_gpu_is_reported_as_what_it_was():
+    """The session of 2026-11-25: a Tesla T4, the step of the short runs stopped by hand during its fifth run, the
+    day-long runs never called. Nothing failed, and times on a T4 say nothing about the estimates made for the G4."""
+    data = experiments_only()
+    data["env"] = {**data["env"], "gpu_name": "Tesla T4", "torch": "2.6.0+cu124"}
+    data["stages"] = {"env": data["stages"]["env"], "memory": data["stages"]["memory"],
+                      "smoke": {"status": "running", "wall_s": 0.0, "calls": 0, "blocked_by": None, "error": None}}
+    stopped = {**run("t1-m7", "t1", "m7", [0.14], status="INTERRUPTED", rounds=0), "inputs_as_recorded": {"trace": True, "partition": True}}
+    data["runs"] = data["runs"][:4] + [stopped] + [run(name, "t2", method, [0.1], group="day", status="NOT RUN", rounds=0) for name, method in (("t2-m7-day", "m7"), ("t2-m0-day", "m0"))]
+    data["repeats"] = []
+    text = digest.render(data)
+    assert "**本次会话只做测量和训练运行：**显存标定完成，短程运行被中断（5 次运行里 4 次跑完），一整天的运行没有运行。" in text
+    assert "| 短程运行 | 被中断 |  | 5 次运行里 4 次跑完 |" in text
+    assert "- 短程运行：开始了，但会话在它结束之前被停止（5 次运行里 4 次跑完）" in text and "- HumAID · 完整方法 · 0 个仿真小时：被中断，跑完了 0 轮" in text
+    assert "- 一整天的运行：没有打开，或会话在它之前结束" in text and "## 5 失败与异常（日志末尾）\n\n无。" in text
+    # An interrupted run is a note, not something to fix; nothing asks to follow an error in its log.
+    found = digest.findings(data)
+    assert [finding["level"] for finding in found if finding["topic"] == "运行"] == ["note"] and "按日志里的报错" not in text
+    # The times are reported with the GPU they belong to and are not turned into a budget.
+    cost = [finding for finding in found if finding["topic"] == "耗时"]
+    assert [finding["level"] for finding in cost] == ["note"] and "这是在 Tesla T4 上量的" in cost[0]["text"] and "来自 G4，两者不能比较" in cost[0]["text"]
+    assert "超出估计" not in text and "比估计高出" not in text and "GPU 小时（原估计" not in text and "大约需要" not in text
+    answer = dict(digest.answers(data, digest.checklist(data)))["一次运行要多久，后面的实验要多少 GPU 小时？"]
+    assert "EuroSAT：每轮 1.5 s，一次 24 小时的运行折算约" in answer and "这些是 Tesla T4 上的耗时；估计和预算针对 G4" in answer and "估计 3–6" not in answer
+    assert digest.other_gpu(session()) is None and digest.other_gpu(experiments_only()) is None and digest.other_gpu({**data, "tiny": True}) is None
+    # In a session with checks, an interrupted run leaves item 7 open instead of failing it.
+    assert digest.checklist(session(runs=[stopped | {"name": "t2-m7", "task": "t2"}]))[-1][2:] == ("NOT RUN", "被中断，没有结果")
+    # A run that was stopped at its time limit is told apart from one that crashed.
+    late = experiments_only()
+    late["runs"][4] = run("t1-m7", "t1", "m7", [0.14], status="TIMEOUT", rounds=1)
+    limit = next(finding for finding in digest.findings(late) if finding["topic"] == "运行")
+    assert limit["level"] == "fix" and "超过了单次运行的时间上限，被停止，跑完了 1 轮" in limit["text"] and "换更快的 GPU" in limit["action"]
+
+
+def test_a_stage_is_marked_when_it_starts_and_short_runs_respect_the_budget(tmp_path, capsys):
+    e0.start_stage(tmp_path, "smoke")
+    assert e0.stage_records(tmp_path)["smoke"]["status"] == "running" and e0.blocked(tmp_path, "pilot") is None
+    # Its outcome replaces the mark and keeps counting calls and time.
+    e0.record_stage(tmp_path, "smoke", "ok", 12.0)
+    e0.start_stage(tmp_path, "smoke")
+    assert (e0.stage_records(tmp_path)["smoke"]["status"], e0.stage_records(tmp_path)["smoke"]["wall_s"], e0.stage_records(tmp_path)["smoke"]["calls"]) == ("running", 12.0, 1)
+    # A run whose process left no record of its end was interrupted with the pipeline: not a failure of the run.
+    (tmp_path / "smoke" / "t1-m7").mkdir(parents=True)
+    (tmp_path / "smoke" / "t1-m7" / "status.json").write_text(json.dumps({"status": "RUNNING", "last_completed_round": 0}))
+    assert e0.read_run(tmp_path / "smoke" / "t1-m7", "t1-m7", "short", "t1", "m7", 2.0, started=False)["status"] == "INTERRUPTED"
+    # Once the budget of the session is used up no new short run starts; a finished one is still reused.
+    write_run(tmp_path / "smoke" / "t2-m7", [2.0, 1.9, 1.8], [0.1, 0.4])
+    (tmp_path / "smoke" / "t2-m7" / "status.json").write_text(json.dumps({"status": "COMPLETED"}))
+    ctx = types.SimpleNamespace(root=tmp_path, tiny=False, remaining=lambda: -1.0, sat_fields=lambda task: {})
+    assert e0.stage_smoke(ctx) is False
+    record = json.loads((tmp_path / "smoke.json").read_text())
+    assert record["statuses"] == {"t2-m7": "COMPLETED", "t2-m0": "SKIPPED", "t2-m2": "SKIPPED", "t2-m4": "SKIPPED", "t1-m7": "SKIPPED"}
+    assert set(record["skipped"]) == {"t2-m0", "t2-m2", "t2-m4", "t1-m7"} and "[t2-m0] skipped: the budget of the session is used up" in capsys.readouterr().out
+    assert digest.budget(record["skipped"]["t2-m0"]) == "会话的预算已经用完，没有开始" and digest.budget({"needed_min": 12.0, "left_min": 5.0}).startswith("预算不够")
 
 
 def test_the_inputs_of_a_run_are_compared_with_the_pinned_hashes():

@@ -35,6 +35,9 @@ REPLAY_SHARE = 0.3           # share of a round spent on replay and aggregation 
 ESTIMATOR_GOOD, ESTIMATOR_POOR = 0.9, 0.6          # correlation of v / mu with the exact directional derivative
 AUTHORS_ZO_GAP = 3.32        # points HO-FL loses without its zeroth-order part, as reported by its authors
 ROUNDS_PER_DAY, EVALUATIONS_PER_DAY = 144, 25
+REFERENCE_GPU = "RTX PRO 6000"   # Colab's G4: the timings behind every estimate of section 10.4 were measured on it
+STATES = {"ok": "完成", "attention": "有问题", "skipped": "跳过", "running": "被中断"}   # the outcome of a stage, as stages.json has it
+GROUPS = {"smoke": "short", "pilot": "day"}   # the group of runs a stage produces
 
 METHODS = {"m0": "理想中心化", "m2": "只让强星训练", "m4": "纯零阶泛洪", "m7": "完整方法"}
 TASKS = {"t1": "HumAID", "t2": "EuroSAT"}
@@ -84,6 +87,8 @@ def budget(note):
     """Why a single run was not started: it did not fit into what was left of the session's time budget."""
     if not note:
         return "没有开始"
+    if note.get("needed_min") is None:
+        return "会话的预算已经用完，没有开始"
     return f"预算不够：需要约 {note['needed_min']:.0f} 分钟，只剩 {note['left_min']:.0f} 分钟"
 
 
@@ -98,6 +103,13 @@ def checked(data):
     stages = data.get("stages") or {}
     return bool(any(name in stages for name in CHECKS) or data.get("baseline") or data.get("tests") or data.get("trace") or data.get("partitions")
                 or any((data.get("selfcheck") or {}).values()))
+
+
+def other_gpu(data):
+    """The name of this session's GPU when it is not the one the estimates of the brief were measured on, else
+    ``None``. Times measured on another GPU say what that GPU costs; they do not test the estimates."""
+    name = (data.get("env") or {}).get("gpu_name")
+    return name if name and REFERENCE_GPU not in name and not data.get("tiny") else None
 
 
 def find_run(data, name):
@@ -258,9 +270,9 @@ def checklist(data):
     rows.append(("6", "轨迹统计与实现说明附录 A 一致", verdict(None if trace is None else trace["returncode"] == 0),
                  "未运行" if trace is None else f"陆地信息来自 {trace['land_source']}，轨迹哈希 {(trace['trace_sha256'] or '无')[:16]}"))
     first = find_run(data, "t2-m7")
-    started = first is not None and first["status"] not in ("SKIPPED", "NOT RUN")
+    started = first is not None and first["status"] not in ("SKIPPED", "NOT RUN", "INTERRUPTED")
     if not started:
-        evidence = "未运行"
+        evidence = "被中断，没有结果" if first is not None and first["status"] == "INTERRUPTED" else "未运行"
     elif finished(first):
         evidence = f"{first['status']}，训练损失 {num(first['verdict'].get('loss_first_third'), 4)} → {num(first['verdict'].get('loss_last_third'), 4)}"
     else:
@@ -448,7 +460,14 @@ def _runs(data, add):
         name = describe(run)
         if run["status"] in ("SKIPPED", "NOT RUN"):
             continue
-        if run["status"] in ("FAILED", "MISSING", "TIMEOUT"):
+        if run["status"] == "INTERRUPTED":   # the session was stopped while it ran: nothing is wrong with the run itself
+            add("note", "运行", f"{name}：被中断，跑完了 {run['rounds']} 轮（会话在它结束之前被停止）。没有报错，也没有可用的结果。")
+            continue
+        if run["status"] == "TIMEOUT":
+            add("block" if run["name"] == "t2-m7" else "fix", "运行", f"{name}：超过了单次运行的时间上限，被停止，跑完了 {run['rounds']} 轮。",
+                "这次运行在这块 GPU 上放不进时间上限：换更快的 GPU 再跑；如果是在 G4 上，查它为什么这么慢（日志末尾见第 5 节）。")
+            continue
+        if run["status"] in ("FAILED", "MISSING"):
             add("block" if run["name"] == "t2-m7" else "fix", "运行", f"{name}：没有跑完（{run['status']}），日志末尾见第 5 节。", "按日志里的报错修改后重跑这一步。")
             continue
         if run["status"] == "DIVERGED":
@@ -513,12 +532,19 @@ def _repeats(data, add):
 
 
 def _cost(data, add):
-    facts = cost_facts(data)
+    facts, gpu = cost_facts(data), other_gpu(data)
     for task, fact in facts.items():
         run, (low, high) = fact["run"], ASSUMED_DAY_RUN_MIN[task]
         text = (f"{TASKS[task]} · 完整方法：每轮 {run['seconds']['round']:.2f} s（本地训练占 {100 * fact['train']:.0f}%，重放与聚合占 {100 * fact['replay']:.0f}%），"
                 f"一次评估 {num(run['seconds']['evaluation'], 1)} s，启动 {run['seconds']['startup']:.0f} s；一次 24 小时的运行"
-                + (f"实测 {fact['minutes']:.1f} 分钟" if fact["measured"] else f"按此折算约 {num(fact['minutes'], 1)} 分钟") + f"（实现说明估计 {low}–{high} 分钟）。")
+                + (f"实测 {fact['minutes']:.1f} 分钟" if fact["measured"] else f"按此折算约 {num(fact['minutes'], 1)} 分钟"))
+        if gpu:
+            add("note", "耗时", text + f"。这是在 {gpu} 上量的；实现说明的估计（{low}–{high} 分钟）来自 G4，两者不能比较，后面实验的预算也不能从这里折算。")
+            if fact["replay"] > REPLAY_SHARE:
+                add("fix", "耗时", f"{TASKS[task]}：重放与聚合占每轮的 {100 * fact['replay']:.0f}%。现在的重放直接调用 `replay_client`，它会把每一步的中间量复制到 CPU 用于比对。",
+                    "在 `ho_fl/sat/aggregate.py` 里写一个不保留中间量的重放，并用测试保证与 `replay_client` 逐位相同；长时间的运行开始前做。")
+            continue
+        text += f"（实现说明估计 {low}–{high} 分钟）。"
         if fact["ratio"]:
             text += (f"按同样的参与构成，实现说明假设每轮 {fact['ratio']['assumed_round_s']:.1f} s，实测是它的 {fact['ratio']['round']:.2f} 倍"
                      f"（只算本地训练是 {fact['ratio']['training']:.2f} 倍）。")
@@ -527,7 +553,7 @@ def _cost(data, add):
         if fact["replay"] > REPLAY_SHARE:
             add("fix", "耗时", f"{TASKS[task]}：重放与聚合占每轮的 {100 * fact['replay']:.0f}%。现在的重放直接调用 `replay_client`，它会把每一步的中间量复制到 CPU 用于比对。",
                 "在 `ho_fl/sat/aggregate.py` 里写一个不保留中间量的重放，并用测试保证与 `replay_client` 逐位相同；长时间的运行开始前做。")
-    hours = plan_hours(facts)
+    hours = None if gpu else plan_hours(facts)
     if hours is not None:
         missing = [TASKS[task] for task in ("t1", "t2") if not (facts.get(task) or {}).get("scale")]
         add("note", "耗时", f"按实测比例粗略折算，实现说明里约 {sum(PLAN_HOURS.values()):.0f} 小时的全部实验大约需要 {hours:.0f} GPU 小时"
@@ -617,12 +643,15 @@ def answers(data, rows):
         if states.get("backbone") is not None:
             memory.append(f"{TASKS[name]}（{MODELS[name]}）：强星 {states['backbone']:.1f} GB，GPU 卫星空闲 {states['hybrid_idle']:.1f} GB、成像 "
                           f"{states['hybrid_imaging']:.1f} GB，推理芯片卫星 {states['forward_only']:.1f} GB。")
-    facts = cost_facts(data)
+    facts, gpu = cost_facts(data), other_gpu(data)
     cost = [f"{TASKS[task]}：每轮 {fact['run']['seconds']['round']:.1f} s，一次 24 小时的运行" + ("实测" if fact["measured"] else "折算约") + f" {num(fact['minutes'], 1)} 分钟"
-            f"（估计 {ASSUMED_DAY_RUN_MIN[task][0]}–{ASSUMED_DAY_RUN_MIN[task][1]}）" + ("，超出估计 30% 以上" if fact["over"] else "") + "。" for task, fact in facts.items()]
-    hours = plan_hours(facts)
+            + ("" if gpu else f"（估计 {ASSUMED_DAY_RUN_MIN[task][0]}–{ASSUMED_DAY_RUN_MIN[task][1]}）" + ("，超出估计 30% 以上" if fact["over"] else "")) + "。"
+            for task, fact in facts.items()]
+    hours = None if gpu else plan_hours(facts)
     if hours is not None:
         cost.append(f"全部实验折算约 {hours:.0f} GPU 小时（原估计 {sum(PLAN_HOURS.values()):.0f}）。")
+    if gpu and cost:
+        cost.append(f"这些是 {gpu} 上的耗时；估计和预算针对 G4，后面实验的 GPU 小时要在 G4 上量过才能算。")
     learning = []
     for name in ("t2-m7", "t1-m7"):
         run = find_run(data, name)
@@ -655,6 +684,14 @@ def answers(data, rows):
 
 
 # --- the report ---------------------------------------------------------------------------------------------------------
+
+def done_of(data, stage):
+    """For a stage of training runs that did not come to its end: how many of its runs did, in brackets."""
+    runs = [run for run in data.get("runs") or [] if run["group"] == GROUPS.get(stage)]
+    if not runs or ((data.get("stages") or {}).get(stage) or {}).get("status") in (None, "ok"):   # never called, or complete
+        return ""
+    return f"（{len(runs)} 次运行里 {sum(finished(run) for run in runs)} 次跑完）"
+
 
 def next_steps(data, rows, found):
     state, items = gate(rows)
@@ -718,8 +755,8 @@ def render(data):
              "OPEN": f"**关卡 G0：还不能判定。** 清单第 {'、'.join(items)} 项没有结果。"}[state])
     else:
         stages = data.get("stages") or {}
-        states = {"ok": "完成", "attention": "有问题", "skipped": "跳过", None: "没有运行"}
-        add("**本次会话只做测量和训练运行：**" + "，".join(f"{STAGES[name]}{states.get((stages.get(name) or {}).get('status'), '有问题')}" for name in SWITCHES) + "。")
+        add("**本次会话只做测量和训练运行：**" + "，".join(f"{STAGES[name]}{STATES.get((stages.get(name) or {}).get('status'), '没有运行')}{done_of(data, name)}"
+                                                    for name in SWITCHES) + "。")
     counts = {level: sum(finding["level"] == level for finding in found) for level in ("block", "fix", "decide")}
     add(f"\n必须先修的 {counts['block']} 项，建议调整的 {counts['fix']} 项，需要你决定的 {counts['decide']} 项（都在第 3 节）。本次会话要回答的问题：\n")
     try:
@@ -777,10 +814,12 @@ def render(data):
         add(f"另有 {len(failures) - 4} 处失败，日志在结果包里：" + "、".join(f"`{failure['log']}`" for failure in failures[4:]) + "。\n")
     add("## 6 没有运行的部分与下一步\n")
     stages = data.get("stages") or {}
-    absent = [f"{STAGES[name]}：" + (("尚未开始（中期报告）" if name in pending else "没有打开，或会话在它之前结束") if name not in stages else f"跳过（{why(stages[name])}）")
+    absent = [f"{STAGES[name]}：" + (("尚未开始（中期报告）" if name in pending else "没有打开，或会话在它之前结束") if name not in stages else
+                                     f"开始了，但会话在它结束之前被停止{done_of(data, name)}" if stages[name].get("status") == "running" else f"跳过（{why(stages[name])}）")
               for name in STAGES if name not in ("env", "feedback") and (name in SWITCHES or name in pending or name in stages)
-              and (name not in stages or stages[name].get("status") == "skipped")]
+              and (name not in stages or stages[name].get("status") in ("skipped", "running"))]
     absent += [f"{describe(run)}：{budget(run.get('note'))}" for run in data.get("runs") or [] if run["status"] == "SKIPPED"]
+    absent += [f"{describe(run)}：被中断，跑完了 {run['rounds']} 轮" for run in data.get("runs") or [] if run["status"] == "INTERRUPTED"]
     absent += [f"HO-FL {run['name']}：{budget(run.get('note'))}" for run in data.get("t0") or [] if run["status"] == "SKIPPED"]
     add("没有运行的：" + ("无。" if not absent else "\n\n" + "\n".join(f"- {entry}" for entry in absent)))
     add("\n下一步：\n")
@@ -813,10 +852,11 @@ def fallback(data, error):
 def _section_time(data, add):
     stages, session = data.get("stages") or {}, data.get("session") or {}
     add("### 4.0 用时\n")
-    states = {"ok": "完成", "attention": "有问题", "skipped": "跳过"}
-    rows = [[STEPS.get(step["name"], step["name"]), states.get(step.get("status"), step.get("status", "")), num(step.get("minutes"), 1), ""]
+    rows = [[STEPS.get(step["name"], step["name"]), STATES.get(step.get("status"), step.get("status", "")), num(step.get("minutes"), 1), ""]
             for step in session.get("steps") or []]
-    rows += [[STAGES[name], states.get(stages[name].get("status"), stages[name].get("status")), num(stages[name].get("wall_s", 0) / 60, 1), why(stages[name])]
+    # A stage that was interrupted has no time of its own: the minutes of its runs are in the table of the runs.
+    rows += [[STAGES[name], STATES.get(stages[name].get("status"), stages[name].get("status")),
+              "" if stages[name].get("status") == "running" else num(stages[name].get("wall_s", 0) / 60, 1), why(stages[name]) or done_of(data, name).strip("（）")]
              for name in STAGES if name in stages and name != "feedback"]
     add(table(["步骤", "状态", "分钟", "说明"], rows) if rows else "没有记录。")
     add("")
