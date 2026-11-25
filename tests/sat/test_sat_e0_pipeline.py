@@ -237,6 +237,67 @@ def test_what_did_not_run_and_what_comes_next():
     assert ("note", "环境") in levels(session()) and "不用 GPU 的准备工作占了 9 分钟" in digest.render(session())
 
 
+# --- a session without checks -----------------------------------------------------------------------------------------------
+
+def experiments_only(**changes):
+    """A Colab session since 2026-11-25: the record of the environment, the memory calibration and the training runs.
+    No check stage is called, so none of them leaves a result."""
+    full = session()
+    runs = [{**entry, "inputs": {"trace_sha256": "8a0e" * 16, "partition_sha256": "47" * 32, "land_source": "global_land_mask"},
+             "inputs_as_recorded": {"trace": True, "partition": True}} for entry in full["runs"]]
+    data = {**full, "stages": {name: full["stages"][name] for name in ("env", *e0.COLAB, "feedback")}, "runs": runs, "t0": [],
+            "baseline": None, "tests": None, "trace": None, "partitions": None, "selfcheck": {"t2": None, "t1": None, "upstream": None},
+            "session": {**full["session"], "steps": [{"name": name, "minutes": 2.0, "status": "ok", "gpu": False} for name in ("code", "environment")]}}
+    data.update(changes)
+    return data
+
+
+def test_a_session_of_measurements_and_runs_has_no_checklist_and_judges_no_gate():
+    data = experiments_only()
+    assert digest.checked(session()) and not digest.checked(data) and digest.checked(experiments_only(tests=session()["tests"]))
+    text = digest.render(data)
+    assert text.startswith("# RHO-FFT 实验反馈：卫星场景的测量与训练运行\n") and "关卡 G0：" not in text and "关卡清单" not in text
+    assert "**本次会话只做测量和训练运行：**显存标定完成，短程运行完成，一整天的运行完成。" in text
+    assert "必须先修的 0 项，建议调整的 0 项，需要你决定的 0 项" in text and "未运行" not in text
+    assert "## 2 本次会话的范围" in text and "- 短程运行（5 次，各 2 个仿真小时）：EuroSAT · 完整方法；" in text and "- 一整天的运行（2 次，各 24 个仿真小时）" in text
+    # The questions about the checks are gone; the four about the measurements and the runs stay.
+    assert [question for question, _ in digest.answers(data, digest.checklist(data))] == [
+        "每个分界要多少显存？", "一次运行要多久，后面的实验要多少 GPU 小时？", "模型在学吗，同一配置重复运行是否相同？", "EuroSAT 会不会太简单，24 小时的时长合适吗？"]
+    # The tables that have something to say are numbered in order; the ones about the checks leave no heading.
+    headings = [line.split("（")[0] for line in text.splitlines() if line.startswith("### 4.")]
+    assert headings == ["### 4.1 用时", "### 4.2 轨迹与划分", "### 4.3 一次参与的峰值显存", "### 4.4 训练运行", "### 4.5 一整天的运行：验证准确率"]
+    # What the trace and data stages used to compare is read from what every run records of its inputs.
+    assert "7 次运行各自记录了所用轨迹和划分的哈希，其中 7 次与记录的参照值（`experiments/sat/e0/expected.json`）相同。" in text
+    assert "没有运行的：无。" in text and "测量和训练运行都完成了" in text and "`docs/reports/P-S3.md`" in text
+    assert not {level for level, _ in levels(data)} & {"block", "fix", "decide"}
+    other = experiments_only()
+    other["runs"][0]["inputs_as_recorded"] = {"trace": False, "partition": True}
+    assert ("fix", "轨迹") in levels(other) and ("fix", "数据") not in levels(other)
+    assert "其中 6 次与记录" in digest.render(other) and "| EuroSAT · 完整方法 · 2 个仿真小时 | `8a0e8a0e8a0e8a0e` | **否** | `4747474747474747` | 是 |" in digest.render(other)
+    # What comes next: fix what blocks, or run again what did not complete, and only that.
+    crashed = experiments_only()
+    crashed["runs"][0] = run("t2-m7", "t2", "m7", [0.1], status="FAILED", rounds=0)
+    assert ("block", "运行") in levels(crashed) and "有必须先修的问题（第 3.1 节）：修改之后只重跑受影响的步骤。" in digest.render(crashed)
+    late = experiments_only()
+    late["stages"]["pilot"] = {"status": "skipped", "wall_s": 0.0, "calls": 1, "blocked_by": "smoke"}
+    text = digest.render(late)
+    assert "一整天的运行跳过。" in text and "- 一整天的运行：跳过（短程运行没有通过）" in text and "一整天的运行没有完成（原因见上）。补跑时只打开对应的开关" in text
+    del late["stages"]["memory"]
+    assert "显存标定没有运行，" in digest.render(late) and "- 显存标定：没有打开，或会话在它之前结束" in digest.render(late)
+
+
+def test_the_inputs_of_a_run_are_compared_with_the_pinned_hashes():
+    pinned = {"trace_sha256": e0.EXPECTED["trace_sha256"]["global_land_mask"], "land_source": "global_land_mask",
+              "partition_sha256": e0.EXPECTED["partition_sha256"]["t2-base-s42"]}
+    assert e0.inputs_as_recorded({"task": "t2", "inputs": pinned}) == {"trace": True, "partition": True}
+    assert e0.inputs_as_recorded({"task": "t1", "inputs": pinned}) == {"trace": True, "partition": False}   # the partition of the other task
+    # The land information decides which trace hash applies: the duty-cycle trace under the name of the real one is not it.
+    assert e0.inputs_as_recorded({"task": "t2", "inputs": {**pinned, "land_source": "duty_cycle"}})["trace"] is False
+    # Nothing to compare: a dry run on synthetic assets, and a run that ended before it had read its inputs.
+    assert e0.inputs_as_recorded({"task": "t2", "inputs": pinned}, tiny=True) == {"trace": None, "partition": None}
+    assert e0.inputs_as_recorded({"task": "t2", "inputs": {}}) == {"trace": None, "partition": None}
+
+
 # --- reading results --------------------------------------------------------------------------------------------------------
 
 def write_run(path, losses, accuracies, wall=1.0):
@@ -433,8 +494,8 @@ def test_expected_hashes_and_run_lists():
     reference = json.loads((REPO / e0.T0_REFERENCE["file"]).read_text())["runs"]
     assert (reference[e0.T0_REFERENCE["on"]]["final_accuracy_pct"], reference[e0.T0_REFERENCE["off"]]["final_accuracy_pct"]) == (85.99, 85.95)
     assert set(e0.REQUIRES) <= set(e0.STAGES) and all(set(needs) <= set(e0.STAGES) for needs in e0.REQUIRES.values())
-    # The HO-FL runs stay callable but are not part of a session any more, so no switch of the notebook belongs to them.
-    assert set(digest.SWITCHES) | {"env", "feedback", "t0"} == set(e0.STAGES) == set(digest.STAGES)
+    # The notebook has a switch per step. The checks and the HO-FL runs stay callable but are not part of a Colab session.
+    assert tuple(digest.SWITCHES) == e0.COLAB and set(digest.SWITCHES) | set(digest.CHECKS) | {"env", "feedback", "t0"} == set(e0.STAGES) == set(digest.STAGES)
     assert e0.SESSION == tuple(stage for stage in e0.STAGES if stage != "t0")
 
 

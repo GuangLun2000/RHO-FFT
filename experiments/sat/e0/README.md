@@ -1,8 +1,15 @@
 # E0: the first experiment of the satellite scenario (gate G0)
 
 `e0.py` runs everything gate G0 of the brief asks for, plus three diagnostics that are cheap now and expensive to
-learn later, and writes one feedback report. `notebooks/RHO-FFT_colab.ipynb` drives it on Colab; the same commands
-work on any machine with a CUDA GPU.
+learn later, and writes one feedback report. The same commands work on any machine with a CUDA GPU.
+
+On Colab, `notebooks/RHO-FFT_colab.ipynb` calls `env`, then `memory`, `smoke` and `pilot` as its three steps, then
+`feedback` (`COLAB` in `e0.py`). The check stages (`baseline`, `tests`, `trace`, `data`, `selfcheck`) were taken out
+of the notebook on 2026-11-25 by the research lead, after they had passed there, to keep GPU time for measurements
+and runs. They stay callable, and `all` still runs them. Without `trace` and `data` a training run builds the trace
+and its partition itself on first use; the report compares the hashes each run records with `expected.json`. A
+report of a session without checks has no checklist and judges no gate: the checklist of gate G0 is kept in the
+milestone report.
 
 ```bash
 python experiments/sat/e0/e0.py env baseline tests trace data --root outputs/sat/e0   # the baseline needs the GPU, the rest does not
@@ -11,9 +18,10 @@ python experiments/sat/e0/e0.py feedback --root outputs/sat/e0                  
 python experiments/sat/e0/e0.py all --tiny --root outputs/sat/e0-tiny                 # CPU dry run, about 4 minutes
 ```
 
-## What the session is for
+## What the stages are for
 
-Every stage exists for one of six questions. Cheap stages that can invalidate the rest come first.
+Every stage exists for one of six questions. Cheap stages that can invalidate the rest come first. The first two
+questions belong to the check stages; a Colab session answers the other four (without the diagnostic of `selfcheck`).
 
 | Question | Stages | What the answer decides |
 | --- | --- | --- |

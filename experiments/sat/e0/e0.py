@@ -30,6 +30,11 @@ Requirements between the stages: selfcheck and memory need baseline and tests; s
 data and selfcheck; pilot needs the two-hour run of the same method to have passed; t0 needs baseline only (it
 runs upstream code). A stage that was never run blocks nothing.
 
+Since 2026-11-25 the Colab session calls only ``memory``, ``smoke`` and ``pilot`` (``COLAB``): the checks passed
+there and the research lead took them out to keep GPU time for measurements and runs. A run builds the trace and
+its partition itself on first use and records their hashes, which the report compares with expected.json. The
+check stages stay callable, and ``all`` (the local dry run) still goes through every one of them.
+
 Every run is a subprocess of this repository's code (nothing is installed). ``--tiny`` replaces models and data by
 the synthetic assets of ho_fl.testing and ho_fl.sat.testing and runs on the CPU: it checks that the pipeline works
 and its numbers mean nothing. The training runs evaluate on the validation split: no server step has been selected
@@ -87,6 +92,7 @@ T0_REFERENCE = {"file": "experiments/p1/references/v1_1121_qwen.json", "on": "A-
 STAGES = ("env", "baseline", "tests", "trace", "data", "selfcheck", "memory", "smoke", "pilot", "t0", "feedback")
 # What "all" runs. The HO-FL runs of E0-b were done on 2026-11-24 (seed 44 completes them); the stage stays callable.
 SESSION = tuple(stage for stage in STAGES if stage != "t0")
+COLAB = ("memory", "smoke", "pilot")   # what the notebook calls, one step each, between "env" and "feedback"
 # The baseline regression that passed on Colab, and the paths it covers: everything outside the satellite package
 # that a run of upstream HO-FL executes. While these are unchanged on the same GPU and PyTorch, it is not repeated.
 VERIFIED = json.loads((HERE / "verified.json").read_text())
@@ -618,8 +624,9 @@ def read_run(path, name, group, task, method, hours, started, note=None):
         status = "MISSING" if started else "NOT RUN"
     elif status == "RUNNING":
         status = "FAILED"
+    config = harness.read_json(path / "config.json") or {}
     run = {"name": name, "group": group, "task": task, "method": method, "hours": hours, "status": status, "note": note, "rounds": len(rounds),
-           "depth": (harness.read_json(path / "config.json") or {}).get("depth"),
+           "depth": config.get("depth"), "inputs": {key: config.get(key) for key in ("trace_sha256", "partition_sha256", "land_source")},
            "verdict": smoke_verdict(path), "wall_s": (summary or {}).get("wall_s") or meta.get("wall_s"),
            "diverged_round": (summary or {}).get("diverged_round"),
            "curve": [{"round": row["round"], "sim_hours": row["sim_hours"], "accuracy": row["accuracy"], "macro_f1": row["macro_f1"], "loss": row["loss"]}
@@ -671,6 +678,16 @@ def compare_repeat(short, day):
             "max_accuracy_difference": max((abs(a["accuracy"] - b["accuracy"]) for a, b in pairs), default=0.0)}
 
 
+def inputs_as_recorded(run, tiny=False):
+    """Whether a run used the trace and the partition whose hashes expected.json pins: ``{"trace", "partition"}``,
+    each true, false, or ``None`` where there is nothing to compare (a dry run, a run that did not get that far)."""
+    inputs = run.get("inputs") or {}
+    trace, partition = inputs.get("trace_sha256"), inputs.get("partition_sha256")
+    pinned = EXPECTED["partition_sha256"].get(f"{run['task']}-base-s{RUN_SEED}")
+    return {"trace": None if tiny or trace is None else trace == EXPECTED["trace_sha256"].get(inputs.get("land_source")),
+            "partition": None if tiny or partition is None or pinned is None else partition == pinned}
+
+
 def log_tail(path, lines=25, width=220):
     return "\n".join(line[:width] for line in harness.tail(path, lines).splitlines())
 
@@ -716,6 +733,7 @@ def collect(ctx):
         for name, task, method in specs:
             note = skipped.get(name)
             run = read_run(root / stage / name, name, group, task, method, duration, started, note)
+            run["inputs_as_recorded"] = inputs_as_recorded(run, ctx.tiny)
             data["runs"].append(run)
             if note is not None:
                 data["skipped_for_budget"].append(name)
@@ -767,7 +785,8 @@ def stage_feedback(ctx):
                 bundle.write(path, f"trace/{name}")
     if not ctx.quiet:
         say(text)
-    say(f"gate G0: {state}" + (f" (items {', '.join(items)})" if items else "") + f"; feedback written to {out}")
+    # A session without checks judges no gate: its report is about the measurements and the runs.
+    say((f"gate G0: {state}" + (f" (items {', '.join(items)})" if items else "") + "; " if digest.checked(data) else "") + f"feedback written to {out}")
     return state != "FAIL"
 
 

@@ -19,7 +19,9 @@ spec = importlib.util.spec_from_file_location("build_notebook", REPO / "notebook
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
-ALL_STAGES = [["env"], ["baseline", "tests", "trace", "data"], ["selfcheck"], ["memory"], ["smoke"], ["pilot"], ["feedback"]]
+# The record of the environment, the three steps (a measurement and two groups of training runs), the report. The
+# checks of gate G0 are not part of a Colab session any more: no dry run, no tests, no regression, no self-check.
+ALL_STAGES = [["env"], ["memory"], ["smoke"], ["pilot"], ["feedback"]]
 
 
 class FakeProcess:
@@ -67,7 +69,7 @@ class Colab:
 
     def popen(self, command, **options):
         code = self.command(command)
-        return FakeProcess(code, ["== env ==\n", "dry run output\n", "== smoke ==\n"] if "--tiny" in self.commands[-1] else ())
+        return FakeProcess(code)
 
     def run_all(self):
         shell = types.SimpleNamespace(set_custom_exc=lambda kinds, handler: self.handlers.append(handler))
@@ -85,8 +87,13 @@ class Colab:
 
     def stages(self):
         """The stage lists of the pipeline calls on the real root, in order."""
-        calls = [shown.split("e0.py ")[1].split(" --root")[0].split() for shown in self.commands if "e0.py" in shown and "--tiny" not in shown]
-        return calls
+        return [shown.split("e0.py ")[1].split(" --root")[0].split() for shown in self.commands if "e0.py" in shown]
+
+
+def builder_stages():
+    """The stages a Colab session calls, as the pipeline names them (``COLAB`` in e0.py)."""
+    source = (REPO / "experiments" / "sat" / "e0" / "e0.py").read_text(encoding="utf-8")
+    return eval(next(line for line in source.splitlines() if line.startswith("COLAB = ")).split("=", 1)[1].split("#")[0])
 
 
 def test_the_notebook_on_disk_is_the_generated_one():
@@ -94,76 +101,72 @@ def test_the_notebook_on_disk_is_the_generated_one():
     notebook = json.loads(builder.NOTEBOOK.read_text(encoding="utf-8"))
     assert notebook["nbformat"] == 4 and notebook["metadata"]["accelerator"] == "GPU" and builder.main(["--check"]) == 0
     kinds = [cell["cell_type"] for cell in notebook["cells"]]
-    assert kinds[0] == "markdown" and kinds.count("code") == 11
+    assert kinds[0] == "markdown" and kinds.count("code") == 8
     for index, cell in enumerate(notebook["cells"]):
         if cell["cell_type"] == "code":
             compile("".join(cell["source"]), f"cell {index}", "exec")
             assert cell["outputs"] == [] and cell["execution_count"] is None
     titles = ["".join(cell["source"]).splitlines()[0] for cell in notebook["cells"] if cell["cell_type"] == "code"]
     assert all(title.startswith("#@title ") for title in titles) and titles[-1].startswith("#@title Feedback")
-    # Only the satellite session: five numbered steps, nothing of the HO-FL replication, no Colab download call.
-    assert [title.split()[1] for title in titles if title.split()[1].isdigit()] == list("12345")
-    text = builder.text()
-    assert "e0.py\", \"t0" not in text and '"t0"' not in text and "google.colab import files" not in text
+    # Only measurements and runs: three numbered steps, one stage of the pipeline each, and no Colab download call.
+    assert [title.split()[1] for title in titles if title.split()[1].isdigit()] == list("123")
+    code = "\n".join("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code")
+    assert [code.count(f'["{stage}"]') for stage in builder_stages()] == [1, 1, 1] and "google.colab import files" not in code
+    assert not any(f'"{name}"' in code for name in ("baseline", "tests", "trace", "data", "selfcheck", "t0", "all", "--tiny", "--force"))
     markdown = "\n".join("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "markdown")
-    assert "## 这次要回答的问题" in markdown and "## 反馈：这次实验说明了什么，代码该怎么改" in markdown
+    assert "## 这次跑什么" in markdown and "## 反馈：这次实验说明了什么，代码该怎么改" in markdown
 
 
 def test_a_session_runs_the_stages_in_order_and_ends_with_feedback_and_release(tmp_path, monkeypatch, capsys):
     colab = Colab(tmp_path, monkeypatch)
     namespace = colab.run_all()
     assert colab.stages() == ALL_STAGES
-    # The record of the environment and the dry run come before the steps; every step carries the deadline of the session.
-    order = [index for index, shown in enumerate(colab.commands) if "e0.py" in shown]
-    assert "e0.py env" in colab.commands[order[0]] and "all --tiny --quiet" in colab.commands[order[1]] and "e0.py baseline tests trace data" in colab.commands[order[2]]
-    steps = [shown for shown in colab.commands if "e0.py" in shown and "--tiny" not in shown and "e0.py env" not in shown and "e0.py feedback" not in shown]
-    assert len(steps) == 5 and all(f"--deadline {namespace['DEADLINE'] - 300}" in shown and "--force" not in shown for shown in steps)
-    assert all("--cache-dir" in shown and "--device cuda" in shown for shown in colab.commands if "e0.py" in shown and "--tiny" not in shown)
+    # Every step carries the deadline of the session; nothing is forced and nothing runs on tiny models.
+    steps = [shown for shown in colab.commands if "e0.py" in shown and "e0.py env" not in shown and "e0.py feedback" not in shown]
+    assert len(steps) == 3 and all(f"--deadline {namespace['DEADLINE'] - 300}" in shown and "--force" not in shown for shown in steps)
+    assert all("--cache-dir" in shown and "--device cuda" in shown and "--tiny" not in shown for shown in colab.commands if "e0.py" in shown)
+    assert not any("git" in shown and "cat-file" in shown for shown in colab.commands)   # no reference commits are needed without the regression
     # One report between the marker lines, the bundle inside the output (the bytes b"zip" are "emlw" in base64), then the GPU goes back.
     assert colab.events == [("bundle", "auto", True), "release"]
     printed = capsys.readouterr().out
     assert printed.count("反馈报告：从下一行开始复制") == 1 and printed.count("# 报告正文") == 1 and printed.count("反馈报告：复制到上一行为止") == 1
     assert "Releasing the GPU runtime in 15 seconds" in printed and "\nTrue\n" not in printed
-    # The dry run shows which stage it has reached, and nothing else of its output while it passes.
-    assert "s  env\n" in printed and "s  smoke\n" in printed and "dry run output" not in printed
     titles = [title for title in namespace["STATUS"] if title[0].isdigit()]
-    assert [title[0] for title in titles] == list("12345") and all(namespace["STATUS"][title] == "ok" for title in titles)
+    assert [title[0] for title in titles] == list("123") and all(namespace["STATUS"][title] == "ok" for title in titles)
     session = json.loads((colab.root / "work" / "sat" / "session.json").read_text())
-    assert [step["name"] for step in session["steps"]] == ["code", "environment", "dry_run"] and all(step["gpu"] is False for step in session["steps"])
+    assert [step["name"] for step in session["steps"]] == ["code", "environment"] and all(step["gpu"] is False for step in session["steps"])
     assert session["budget_hours"] == 1.5 and session["repo_ref"] == "main" and len(colab.handlers) == 1
 
 
 def test_a_failing_stage_does_not_stop_the_session(tmp_path, monkeypatch, capsys):
-    colab = Colab(tmp_path, monkeypatch, codes={"e0.py selfcheck": 1})
+    colab = Colab(tmp_path, monkeypatch, codes={"e0.py smoke": 1})
     namespace = colab.run_all()
     # The notebook goes on: the pipeline itself skips what builds on the failed stage, and says so in the report.
     assert colab.stages() == ALL_STAGES and colab.events[-1] == "release"
     status = {title[0]: state for title, state in namespace["STATUS"].items() if title[0].isdigit()}
-    assert status["2"].startswith("ATTENTION") and status["3"] == "ok"
-    assert "2 · Correctness checks on the real models: ATTENTION" in capsys.readouterr().out
+    assert status["1"] == "ok" and status["2"].startswith("ATTENTION") and status["3"] == "ok"
+    assert "2 · Short runs: two simulated hours each: ATTENTION" in capsys.readouterr().out
 
 
 def test_switches_and_the_budget_decide_what_is_called(tmp_path, monkeypatch, capsys):
-    colab = Colab(tmp_path, monkeypatch, RUN_MEMORY=False, RUN_DRY_RUN=False, FORCE=True, DOWNLOAD_BUNDLE=False, RELEASE_GPU=False)
+    colab = Colab(tmp_path, monkeypatch, RUN_MEMORY=False, DOWNLOAD_BUNDLE=False, RELEASE_GPU=False)
     namespace = colab.run_all()
-    assert colab.stages() == [["env"], ["baseline", "tests", "trace", "data"], ["selfcheck"], ["smoke"], ["pilot"], ["feedback"]]
-    assert not any("--tiny" in shown for shown in colab.commands) and colab.events == []
-    assert all("--force" in shown for shown in colab.commands if "e0.py smoke" in shown)
+    assert colab.stages() == [["env"], ["smoke"], ["pilot"], ["feedback"]] and colab.events == []
     printed = capsys.readouterr().out
     assert printed.count("反馈报告：从下一行开始复制") == 1 and "RELEASE_GPU is off" in printed and "result bundle: not available" in printed
-    assert namespace["STATUS"]["3 · Peak GPU memory of a participation per cut"] == "switched off"
+    assert namespace["STATUS"]["1 · Peak GPU memory of a participation per cut"] == "switched off"
     # A budget that is used up: nothing new starts, the feedback is still written and the GPU released.
-    spent = Colab(tmp_path / "spent", monkeypatch, BUDGET_HOURS=0.0, RUN_DRY_RUN=False)
+    spent = Colab(tmp_path / "spent", monkeypatch, BUDGET_HOURS=0.0)
     namespace = spent.run_all()
     assert spent.stages() == [["env"], ["feedback"]] and spent.events[-1] == "release"
     assert {state for title, state in namespace["STATUS"].items() if title[0].isdigit()} == {"skipped (no budget left)"}
 
 
 def test_an_error_prints_the_feedback_and_releases_the_gpu(tmp_path, monkeypatch, capsys):
-    colab = Colab(tmp_path, monkeypatch, codes={"all --tiny": 1})
-    with pytest.raises(RuntimeError, match="The dry run failed"):
+    colab = Colab(tmp_path, monkeypatch, codes={"e0.py env": 1})   # the training interpreter finds no GPU
+    with pytest.raises(RuntimeError, match="does not see a CUDA device"):
         colab.run_all()
-    assert colab.stages() == [["env"]] and colab.events == [] and "dry run output" in capsys.readouterr().out
+    assert colab.stages() == [["env"]] and colab.events == []
     # IPython hands the error to the handler registered in the first cell.
     shown = []
     colab.handlers[0](types.SimpleNamespace(showtraceback=lambda info, tb_offset=None: shown.append(info[0])), RuntimeError, RuntimeError("x"), None)

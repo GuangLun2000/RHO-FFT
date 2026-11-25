@@ -14,8 +14,9 @@ the pipeline script that runs it. Results go to `outputs/sat/` (or the `--root` 
 The experiments run on Colab, one session at a time, and each session feeds the next:
 
 1. A session is run for a short list of questions. Every run answers one of them and names the decision that
-   depends on the answer; a run nobody would act on is not scheduled. Cheap checks that can invalidate the rest come
-   first, and a stage does not start when a stage it builds on did not pass.
+   depends on the answer; a run nobody would act on is not scheduled. A stage does not start when a stage it builds
+   on did not pass. Checks of the code are not scheduled on Colab (decision of the research lead, 2026-11-25): the
+   CPU tests a change touches run locally before it is pushed, and the checks stay callable as stages of the pipeline.
 2. The pipeline ends with a feedback report (`e0/digest.py` is the pattern): the state of the gate, the answers, the
    findings with the file to change or the decision to take, the measured cost of what comes next, and what to run
    in the following session.

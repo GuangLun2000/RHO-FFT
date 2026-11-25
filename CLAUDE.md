@@ -96,9 +96,14 @@ no f-string features of 3.12 (the same quote inside a nested f-string, a backsla
 Code, then a Colab session, then the feedback report, then code again (`experiments/sat/README.md`):
 
 - **Planning a session.** List the questions it answers and, for each run, the decision that depends on the answer.
-  Leave out runs nobody would act on. Put cheap checks that can invalidate the rest first and let the pipeline skip
-  what builds on a failed stage (`REQUIRES` in `experiments/sat/e0/e0.py`). Measure cost before spending it: time
-  per participation, round and evaluation is logged by the engine and projected onto the remaining plan.
+  Leave out runs nobody would act on, and let the pipeline skip what builds on a failed stage (`REQUIRES` in
+  `experiments/sat/e0/e0.py`). Measure cost before spending it: time per participation, round and evaluation is
+  logged by the engine and projected onto the remaining plan.
+- **No check steps on Colab.** Since 2026-11-25 the notebook holds only steps that produce experimental data
+  (decision of the research lead: GPU time is not spent on checks that pass). No dry run, test suite, baseline
+  regression or self-check goes into the notebook; they remain stages of the pipeline, and the CPU tests a change
+  touches are run locally before it is pushed. What a check used to guard is read from what the runs record anyway (for example the trace and partition
+  hashes of every run against `expected.json`).
 - **The report.** A pipeline ends with a report written for the research lead, in Chinese, by rules that are tested
   without running anything (`experiments/sat/e0/digest.py`): state of the gate, answers, findings (what to fix and in
   which file, what the lead has to decide, observations), the numbers, the end of failed logs, what to run next.

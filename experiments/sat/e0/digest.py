@@ -13,6 +13,10 @@ lead on the Colab page. Its parts:
     5  the end of the log of everything that failed
     6  what did not run, and what the next session should do
 
+The Colab session runs measurements and training runs only (the checks of gate G0 passed there and were taken out
+on 2026-11-25; they stay callable). A report of such a session has no checklist and judges no gate: part 2 says
+what the session covered, and the questions and tables about the checks are left out. ``checked`` tells the two apart.
+
 A finding is ``{"level", "topic", "text", "action"}``. Levels: ``block`` (a gate item failed), ``fix`` (code or
 pipeline should change), ``decide`` (a choice that affects the experiments: the research lead's), ``note`` (worth
 knowing) and ``good`` (a confirmation). Every threshold a finding depends on is a constant below.
@@ -41,8 +45,8 @@ STAGES = {"env": "环境记录", "baseline": "基线回归", "tests": "CPU 测�
           "selfcheck": "正确性检查", "memory": "显存标定", "smoke": "短程运行", "pilot": "一整天的运行",
           "t0": "HO-FL 零阶开关", "feedback": "反馈报告"}
 STEPS = {"code": "取代码", "environment": "建环境", "dry_run": "预演（CPU）"}   # steps of the notebook itself
-SWITCHES = {"baseline": "RUN_CHECKS", "tests": "RUN_CHECKS", "trace": "RUN_CHECKS", "data": "RUN_CHECKS", "selfcheck": "RUN_SELFCHECK",
-            "memory": "RUN_MEMORY", "smoke": "RUN_SHORT_RUNS", "pilot": "RUN_DAY_RUNS"}   # the switches of the notebook
+SWITCHES = {"memory": "RUN_MEMORY", "smoke": "RUN_SHORT_RUNS", "pilot": "RUN_DAY_RUNS"}   # the steps of the notebook and their switches
+CHECKS = ("baseline", "tests", "trace", "data", "selfcheck")   # the check stages: callable, not part of the Colab session
 REASONS = {"memory": "显存", "eclipse": "地影", "energy": "电量", "unreachable": "不可达"}
 WHERE = {2: "`ho_fl/algorithms.py` 的 `hybrid_step`（显式给出分界的路径）",
          3: "`ho_fl/sat/client.py` 的 `train_participation`",
@@ -86,6 +90,14 @@ def budget(note):
 def describe(run):
     """A run in words: task, method, simulated duration."""
     return f"{TASKS.get(run['task'], run['task'])} · {METHODS.get(run['method'], run['method'])} · {run['hours']:g} 个仿真小时"
+
+
+def checked(data):
+    """Whether a check stage ran in this session, or left a result in its directory. Without one the report is
+    that of a session of measurements and runs: no checklist, no verdict on the gate."""
+    stages = data.get("stages") or {}
+    return bool(any(name in stages for name in CHECKS) or data.get("baseline") or data.get("tests") or data.get("trace") or data.get("partitions")
+                or any((data.get("selfcheck") or {}).values()))
 
 
 def find_run(data, name):
@@ -275,7 +287,7 @@ def findings(data):
     def add(level, topic, text, action=None):
         found.append({"level": level, "topic": topic, "text": text, "action": action})
 
-    for rule in (_environment, _stage_errors, _baseline, _tests, _inputs, _selfcheck, _estimator, _memory, _runs, _repeats, _cost, _day_runs, _hofl, _session):
+    for rule in (_environment, _stage_errors, _baseline, _tests, _inputs, _selfcheck, _estimator, _memory, _runs, _run_inputs, _repeats, _cost, _day_runs, _hofl, _session):
         try:
             rule(data, add)
         except Exception as error:   # one rule that cannot read the data must not take the other findings with it
@@ -295,8 +307,8 @@ def _environment(data, add):
     if not env or data.get("tiny"):
         return
     if env.get("torch") and not env["torch"].startswith("2.6.0"):
-        add("note", "环境", f"PyTorch 是 {env['torch']}，不是固定的 2.6.0（固定版本用不了这块 GPU 时，notebook 会自动换用）。基线回归在同一环境里做，"
-                            "所以“没有改坏 HO-FL”的结论不受影响；数值只对这个环境成立。")
+        add("note", "环境", f"PyTorch 是 {env['torch']}，不是固定的 2.6.0（固定版本用不了这块 GPU 时，notebook 会自动换用）。"
+                            + ("基线回归在同一环境里做，所以“没有改坏 HO-FL”的结论不受影响；" if data.get("baseline") else "") + "数值只对这个环境成立。")
     if env.get("land_mask_installed") is False:
         add("fix", "环境", "陆地掩膜包没有装上，成像判断用的是占空比替代，成像比例和轨迹哈希都与正式设置不同。",
             "检查 notebook 的环境步骤是否安装了可选依赖组 `sat`（`global-land-mask`）。")
@@ -469,6 +481,24 @@ def _runs(data, add):
                 + "，低于附录 A 的约 85% / 87%。", "对照 `ho_fl/sat/energy.py` 的电池记账；下限是 30%，目前不影响参与。")
 
 
+def _run_inputs(data, add):
+    """The trace and the partition a run built for itself, against the pinned hashes: what the trace and data
+    stages used to compare, read from what every run records."""
+    other = {"trace": [], "partition": []}
+    for run in data.get("runs") or []:
+        for key, same in (run.get("inputs_as_recorded") or {}).items():
+            if same is False:
+                other[key].append(describe(run))
+    if other["trace"]:
+        add("fix", "轨迹", f"{len(other['trace'])} 次运行用的轨迹哈希与记录的参照值不同（{'、'.join(other['trace'][:3])}{' 等' if len(other['trace']) > 3 else ''}）。"
+                           "本次会话内各次运行用的是同一份轨迹，配对不受影响；与以前会话的结果不能直接比较。",
+            "先确认陆地掩膜包装上了（见“环境”）；若装上了仍不同，查 `ho_fl/sat/scenario.py` 或数值库版本，并决定是否更新 `experiments/sat/e0/expected.json`。")
+    if other["partition"]:
+        add("fix", "数据", f"{len(other['partition'])} 次运行用的划分哈希与记录的参照值不同（{'、'.join(other['partition'][:3])}{' 等' if len(other['partition']) > 3 else ''}）。"
+                           "本次会话内各方法用的是同一份划分，配对不受影响；与以前会话的结果不能直接比较。",
+            "查数据集的修订版本和 `ho_fl/sat/datasets.py`，并决定是否更新 `experiments/sat/e0/expected.json`。")
+
+
 def _repeats(data, add):
     for repeat in data.get("repeats") or []:
         pair = f"{TASKS.get(repeat['task'], repeat['task'])} · {METHODS.get(repeat['method'], repeat['method'])}"
@@ -545,7 +575,7 @@ def _session(data, add):
     total = sum(idle.values())
     if total >= 5 and not data.get("tiny"):
         add("note", "用时", f"不用 GPU 的准备工作占了 {total:.0f} 分钟（" + "、".join(f"{name} {minutes:.1f}" for name, minutes in idle.items())
-            + "）。这段时间 GPU 是空着的。", "流程稳定后可以关掉预演（`RUN_DRY_RUN`）；测试每次会话都要在固定版本的环境里跑一遍，不建议关。")
+            + "）。这段时间 GPU 是空着的。")
     late = data.get("skipped_for_budget") or []
     if late:
         add("note", "用时", f"有 {len(late)} 个运行因为预算不够没有开始：{'、'.join(late)}。", "下次只开这些运行对应的开关，或把 `BUDGET_HOURS` 调大。")
@@ -612,9 +642,11 @@ def answers(data, rows):
         sixth = f"理想中心化第 {day['hours']:g} 小时的验证准确率是 {pct(day['ideal'], 1)}%" + (f"，完整方法 {pct(day['full'], 1)}%" if day["full"] is not None else "") + "。"
         sixth += (f"第 {day['saturated_at']:g} 小时就到了 {100 * SATURATION:.0f}%：偏简单，见第 3.2 节。" if day["saturated_at"] is not None
                   else f"步长未调时没有到 {100 * SATURATION:.0f}%，是否太简单等选完步长再看。")
-    result = [("原有的 HO-FL 有没有被改坏？", first), ("卫星部分的代码在真实模型上对不对？", second), ("每个分界要多少显存？", " ".join(memory) or "未运行。"),
-              ("一次运行要多久，后面的实验要多少 GPU 小时？", " ".join(cost) or "未运行。"), ("模型在学吗，零阶估计可信吗？", " ".join(learning) or "未运行。"),
-              ("EuroSAT 会不会太简单，24 小时的时长合适吗？", sixth)]
+    # The two questions about the checks belong to a session that ran checks.
+    result = [("原有的 HO-FL 有没有被改坏？", first), ("卫星部分的代码在真实模型上对不对？", second)] if checked(data) else []
+    result += [("每个分界要多少显存？", " ".join(memory) or "未运行。"), ("一次运行要多久，后面的实验要多少 GPU 小时？", " ".join(cost) or "未运行。"),
+               ("模型在学吗，零阶估计可信吗？" if checked(data) else "模型在学吗，同一配置重复运行是否相同？", " ".join(learning) or "未运行。"),
+               ("EuroSAT 会不会太简单，24 小时的时长合适吗？", sixth)]
     hofl = hofl_facts(data)
     if hofl is not None:   # only when the HO-FL runs of E0-b were part of this session
         result.append(("HO-FL 里零阶到底有多大作用？", f"{len(hofl['gaps'])} 个种子上，保留零阶比关掉高 {hofl['mean']:+.2f} 个点（标准差 {hofl['sd']:.2f}）；"
@@ -629,6 +661,18 @@ def next_steps(data, rows, found):
     stages = data.get("stages") or {}
     lines = []
     decisions = sum(finding["level"] == "decide" for finding in found)
+    if not checked(data):
+        open_steps = [STAGES[name] for name in SWITCHES if (stages.get(name) or {}).get("status") != "ok"]
+        if any(finding["level"] == "block" for finding in found):
+            lines.append("有必须先修的问题（第 3.1 节）：修改之后只重跑受影响的步骤。")
+        elif open_steps:
+            lines.append(f"{'、'.join(open_steps)}没有完成（原因见上）。补跑时只打开对应的开关，已完成的步骤不用重跑。")
+        else:
+            lines.append("测量和训练运行都完成了。这些数字填进里程碑报告 `docs/reports/P-S3.md`，用来判定关卡 G0，并按实测耗时安排后面的方法对比实验。")
+        if decisions:
+            lines.append(f"请先定第 3.2 节的 {decisions} 件事，它们会改变后面实验的设计。")
+        lines.append("把这份报告整段复制回来即可；需要查细节时再给 `session_bundle.zip`（每次运行的日志和 JSON 都在里面）。")
+        return lines
     if state == "PASS":
         lines.append("关卡 G0 的七项检查都通过了。接下来不需要 GPU：写另外四种方法（经地面服务器、邻居平均、按节点混合、固定分界的静态版本）、"
                      "保护措施与故障注入、指标汇总。下一次会话在 EuroSAT 上对全部方法做冒烟并选服务器步长。")
@@ -643,7 +687,7 @@ def next_steps(data, rows, found):
         done = [name for name in ("memory", "pilot") if (stages.get(name) or {}).get("status") == "ok"]
         if done:
             lines.append("重跑时可以关掉已经完成、与要改的代码无关的步骤：" + "、".join(f"`{SWITCHES[name]}`（{STAGES[name]}）" for name in done)
-                         + "。基线回归、测试和正确性检查每次都要跑。")
+                         + "。")
     lines.append("把这份报告整段复制回来即可；需要查细节时再给 `session_bundle.zip`（每次运行的日志和 JSON 都在里面）。")
     return lines
 
@@ -654,7 +698,8 @@ def render(data):
     env, session = data.get("env") or {}, data.get("session") or {}
     rows, found = checklist(data), findings(data)
     state, items = gate(rows)
-    add("# RHO-FFT 实验反馈：卫星场景的第一个实验（关卡 G0）\n")
+    with_checks = checked(data)
+    add("# RHO-FFT 实验反馈：卫星场景的第一个实验（关卡 G0）\n" if with_checks else "# RHO-FFT 实验反馈：卫星场景的测量与训练运行\n")
     head = [f"生成于 {data['generated_at']}（UTC）"]
     if not data.get("tiny"):
         head += [f"代码 {((env.get('git') or {}).get('head') or '?')[:12]}", f"GPU {env.get('gpu_name') or '?'}", f"torch {env.get('torch') or '?'}"]
@@ -667,9 +712,14 @@ def render(data):
     if pending:
         add(f"\n**这是中期报告：{'、'.join(STAGES[name] for name in pending)}还没有开始，会话最后的完整报告会包含它。**")
     add("\n## 1 结论\n")
-    add({"PASS": "**关卡 G0：通过。** 七项检查都通过。",
-         "FAIL": f"**关卡 G0：未通过。** 清单第 {'、'.join(items)} 项没有通过，见第 3.1 节。",
-         "OPEN": f"**关卡 G0：还不能判定。** 清单第 {'、'.join(items)} 项没有结果。"}[state])
+    if with_checks:
+        add({"PASS": "**关卡 G0：通过。** 七项检查都通过。",
+             "FAIL": f"**关卡 G0：未通过。** 清单第 {'、'.join(items)} 项没有通过，见第 3.1 节。",
+             "OPEN": f"**关卡 G0：还不能判定。** 清单第 {'、'.join(items)} 项没有结果。"}[state])
+    else:
+        stages = data.get("stages") or {}
+        states = {"ok": "完成", "attention": "有问题", "skipped": "跳过", None: "没有运行"}
+        add("**本次会话只做测量和训练运行：**" + "，".join(f"{STAGES[name]}{states.get((stages.get(name) or {}).get('status'), '有问题')}" for name in SWITCHES) + "。")
     counts = {level: sum(finding["level"] == level for finding in found) for level in ("block", "fix", "decide")}
     add(f"\n必须先修的 {counts['block']} 项，建议调整的 {counts['fix']} 项，需要你决定的 {counts['decide']} 项（都在第 3 节）。本次会话要回答的问题：\n")
     try:
@@ -678,8 +728,18 @@ def render(data):
         replies = [("各个问题的答案生成时出错", f"{error!r}；请看第 2、3 节。")]
     for index, (question, answer) in enumerate(replies, 1):
         add(f"{index}. **{question}** {answer}")
-    add("\n## 2 关卡清单（实现说明 §10.1 的 E0-a）\n")
-    add(table(["项", "检查", "结论", "依据"], [[item, what, VERDICTS[verdict], evidence] for item, what, verdict, evidence in rows]))
+    if with_checks:
+        add("\n## 2 关卡清单（实现说明 §10.1 的 E0-a）\n")
+        add(table(["项", "检查", "结论", "依据"], [[item, what, VERDICTS[verdict], evidence] for item, what, verdict, evidence in rows]))
+    else:
+        add("\n## 2 本次会话的范围\n")
+        add("- 显存标定：Qwen2.5-1.5B 和 ViT-B/16 在每个分界上一次参与的峰值显存。")
+        for group, title in (("short", "短程运行"), ("day", "一整天的运行")):
+            runs = [run for run in data.get("runs") or [] if run["group"] == group]
+            if runs:
+                add(f"- {title}（{len(runs)} 次，各 {runs[0]['hours']:g} 个仿真小时）：" + "；".join(f"{TASKS.get(run['task'], run['task'])} · {METHODS.get(run['method'], run['method'])}" for run in runs) + "。")
+        add("- 不在会话里的：测试、基线回归、轨迹与数据的核对、真实模型上的正确性检查。它们只确认代码正确，不产生实验数据；"
+            "关卡 G0 的清单以里程碑报告 `docs/reports/P-S3.md` 为准。每次运行自己生成轨迹和划分，哈希是否与记录一致见第 4 节。")
     add("\n## 3 发现与建议的调整\n")
     groups = (("3.1 需要改代码或流程的", ("block", "fix")), ("3.2 需要你决定的（会影响实验设计或结论）", ("decide",)), ("3.3 值得知道的观察", ("note",)),
               ("3.4 得到确认的", ("good",)))
@@ -694,11 +754,16 @@ def render(data):
         if chosen:
             add("")
     add("## 4 数据\n")
+    number = 0
     for section in (_section_time, _section_checks, _section_inputs, _section_memory, _section_estimator, _section_runs, _section_day, _section_hofl):
+        part = []
         try:
-            section(data, add)
+            section(data, part.append)
         except Exception as error:   # a table that cannot be drawn is named; the rest of the report stands
-            add(f"（这一小节生成时出错：{error!r}；数据在结果包的 `feedback/feedback_E0.json` 里。）\n")
+            part = [f"### 4.0 （这一小节生成时出错：{error!r}；数据在结果包的 `feedback/feedback_E0.json` 里。）\n"]
+        if part:   # a section that has nothing to say about this session leaves no heading; the others are numbered in order
+            number += 1
+            lines.extend([part[0].replace("### 4.0 ", f"### 4.{number} ", 1)] + part[1:])
     add("## 5 失败与异常（日志末尾）\n")
     failures = data.get("failures") or []
     broken = [(name, entry["error"]) for name, entry in (data.get("stages") or {}).items() if entry.get("error")]
@@ -747,7 +812,7 @@ def fallback(data, error):
 
 def _section_time(data, add):
     stages, session = data.get("stages") or {}, data.get("session") or {}
-    add("### 4.1 用时\n")
+    add("### 4.0 用时\n")
     states = {"ok": "完成", "attention": "有问题", "skipped": "跳过"}
     rows = [[STEPS.get(step["name"], step["name"]), states.get(step.get("status"), step.get("status", "")), num(step.get("minutes"), 1), ""]
             for step in session.get("steps") or []]
@@ -758,7 +823,9 @@ def _section_time(data, add):
 
 
 def _section_checks(data, add):
-    add("### 4.2 正确性检查\n")
+    if not checked(data):
+        return
+    add("### 4.0 正确性检查\n")
     baseline = data.get("baseline")
     if baseline and baseline.get("configs"):
         add("基线回归（与上游提交比较）：" + "；".join(f"`{name}` {entry['verdict']}，最终参数的最大差 {small(entry.get('max_abs_state_diff'))}"
@@ -790,7 +857,22 @@ def _section_checks(data, add):
 
 
 def _section_inputs(data, add):
-    add("### 4.3 轨迹与划分\n")
+    add("### 4.0 轨迹与划分\n")
+    if not checked(data):   # no trace or data stage: what every run recorded of the inputs it built for itself
+        compared = [(run, run["inputs_as_recorded"]) for run in data.get("runs") or [] if any(value is not None for value in (run.get("inputs_as_recorded") or {}).values())]
+        if not compared:
+            add("没有可比的运行（没有运行跑到读入轨迹和划分这一步，或这是预演）。\n")
+            return
+        same = [run for run, flags in compared if all(value is not False for value in flags.values())]
+        add(f"{len(compared)} 次运行各自记录了所用轨迹和划分的哈希，其中 {len(same)} 次与记录的参照值（`experiments/sat/e0/expected.json`）相同。")
+        other = [[describe(run), f"`{(run['inputs'].get('trace_sha256') or '')[:16]}`", {True: "是", False: "**否**", None: "无记录"}[flags.get("trace")],
+                  f"`{(run['inputs'].get('partition_sha256') or '')[:16]}`", {True: "是", False: "**否**", None: "无记录"}[flags.get("partition")]]
+                 for run, flags in compared if run not in same]
+        if other:
+            add("")
+            add(table(["运行", "轨迹哈希", "与记录相同", "划分哈希", "与记录相同"], other))
+        add("")
+        return
     trace = data.get("trace")
     if trace is None:
         add("轨迹：没有生成。")
@@ -812,7 +894,7 @@ def _section_inputs(data, add):
 
 
 def _section_memory(data, add):
-    add("### 4.4 一次参与的峰值显存（GB）\n")
+    add("### 4.0 一次参与的峰值显存（GB）\n")
     shown = False
     for name, memory in (data.get("memory") or {}).items():
         if not memory:
@@ -832,7 +914,9 @@ def _section_memory(data, add):
 
 
 def _section_estimator(data, add):
-    add("### 4.5 零阶估计的保真度（诊断，不计入关卡）\n")
+    if not checked(data):
+        return
+    add("### 4.0 零阶估计的保真度（诊断，不计入关卡）\n")
     shown = False
     for name in ("t2", "t1"):
         rows = ((data.get("selfcheck") or {}).get(name) or {}).get("estimator")
@@ -852,7 +936,7 @@ def _section_estimator(data, add):
 
 
 def _section_runs(data, add):
-    add("### 4.6 训练运行（种子 42，服务器步长 1，在验证集上评估）\n")
+    add("### 4.0 训练运行（种子 42，服务器步长 1，在验证集上评估）\n")
     runs = [run for run in data.get("runs") or [] if run.get("rounds")]
     if not runs:
         add("没有完成的运行。\n")
@@ -892,7 +976,7 @@ def _section_runs(data, add):
 
 
 def _section_day(data, add):
-    add("### 4.7 一整天的运行：验证准确率（%）随仿真时间的变化\n")
+    add("### 4.0 一整天的运行：验证准确率（%）随仿真时间的变化\n")
     runs = [run for run in data.get("runs") or [] if run["group"] == "day" and run.get("rounds") and run["curve"]]
     if not runs:
         add("没有运行。\n")
@@ -915,7 +999,7 @@ def _section_day(data, add):
 def _section_hofl(data, add):
     if not any(run.get("accuracy") is not None or run["status"] == "SKIPPED" for run in data.get("t0") or []):
         return   # the HO-FL runs of E0-b are not part of the session any more; the table appears only when they were run
-    add("### 4.8 HO-FL 的零阶开与关（Qwen2.5-1.5B、AG News、Dirichlet 0.5、β = 0.75、160 轮）\n")
+    add("### 4.0 HO-FL 的零阶开与关（Qwen2.5-1.5B、AG News、Dirichlet 0.5、β = 0.75、160 轮）\n")
     by_seed = hofl_by_seed(data)
     rows = []
     for seed in sorted(by_seed):
