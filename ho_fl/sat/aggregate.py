@@ -17,6 +17,7 @@ arrived, late first-order updates included, which is the divide-by-K rule of HO-
 The first-order tensors are the participants' own, so they are bitwise what a central server would sum; the
 replayed tensors agree with what the participant computed locally within the tolerance of the replay.
 """
+from collections import Counter
 from dataclasses import dataclass
 
 import torch
@@ -140,6 +141,54 @@ def round_updates(groups, reports, delivery, cfg):
         terms[group] = round_terms(groups.state(group), reports, delivery, cfg)
         updates[group] = sum_terms(groups.state(group), terms[group])
     return updates, terms
+
+
+@torch.no_grad()
+def channel_statistics(terms):
+    """How the two channels share the update of a round, block by block. A diagnostic: it reads the terms that
+    ``round_terms`` built (with accumulators of its own) and changes nothing of the update.
+
+    For every block that received anything (``blocks``, ascending; the head of a vision task is block ``depth``):
+
+    ``fo_n``, ``zo_n``        how many of the ``counted`` participants sent a first-order / a zeroth-order update
+    ``fo_norm``, ``zo_norm``  the norms of the two parts of the mean update: each sum divided by the number of
+                              counted participants, as the update itself is
+    ``cos``                   the cosine between the two sums: above zero when the zeroth-order updates of the
+                              satellites below their cut point the way the first-order updates of the others
+                              do; ``None`` where a part is missing or zero
+
+    ``None`` when nobody is counted. The divisor of the update counts every participant, so a block to which few
+    of them send a first-order update gets a correspondingly smaller first-order step: ``fo_n / counted`` says
+    how much smaller, and the two norms say what the zeroth-order updates put in its place.
+    """
+    if not terms:
+        return None
+    sums, numbers = ({}, {}), (Counter(), Counter())   # first-order, zeroth-order
+    for term in terms:
+        for part, total, number in zip((term.first_order, term.zeroth_order), sums, numbers):
+            for name, tensor in part.items():
+                if name not in total:
+                    total[name] = torch.zeros_like(tensor, dtype=torch.float32)
+                total[name].add_(tensor)
+            number.update({block_index(name) for name in part})
+    names = sorted(set(sums[0]) | set(sums[1]))
+    blocks = sorted({block_index(name) for name in names})
+    if not names:
+        return None
+    zero = torch.zeros((), dtype=torch.float32, device=next(iter({**sums[1], **sums[0]}.values())).device)
+    rows = []
+    for block in blocks:
+        members = [name for name in names if block_index(name) == block]
+        first = sum((sums[0][name].square().sum() for name in members if name in sums[0]), zero)
+        zeroth = sum((sums[1][name].square().sum() for name in members if name in sums[1]), zero)
+        dot = sum(((sums[0][name] * sums[1][name]).sum() for name in members if name in sums[0] and name in sums[1]), zero)
+        rows.append(torch.stack([first, zeroth, dot]))
+    table = torch.stack(rows).double().cpu().tolist()   # one synchronisation with the device
+    count = len(terms)
+    return {"counted": count, "blocks": blocks,
+            "fo_n": [numbers[0].get(block, 0) for block in blocks], "zo_n": [numbers[1].get(block, 0) for block in blocks],
+            "fo_norm": [first ** 0.5 / count for first, _, _ in table], "zo_norm": [zeroth ** 0.5 / count for _, zeroth, _ in table],
+            "cos": [dot / (first * zeroth) ** 0.5 if first > 0 and zeroth > 0 else None for first, zeroth, dot in table]}
 
 
 @torch.no_grad()

@@ -13,7 +13,8 @@ the last one, i.e. at whole simulated hours with the defaults: 25 points from 0 
 Files written to the run directory:
 
     config.json    the configuration and everything that identifies the inputs (trace, partition and git hashes)
-    rounds.jsonl   one row per round
+    rounds.jsonl   one row per round; ``channels`` holds, block by block, how many participants sent a first-order
+                   and a zeroth-order update and how large the two parts of the update were (``channel_statistics``)
     ledger.jsonl   one row per participation
     eval.jsonl     one row per evaluation
     summary.json   final metrics and the status: COMPLETED, or DIVERGED when values stopped being finite
@@ -35,7 +36,7 @@ import torch
 from ..algorithms import restore
 from ..grid import git_head
 from ..io import append_jsonl, tensor_hash, write_json
-from .aggregate import Groups, replica_difference, round_updates
+from .aggregate import Groups, channel_statistics, replica_difference, round_updates
 from .backend import SatBackend
 from .client import train_participation
 from .config import CLASSES
@@ -182,7 +183,7 @@ def run(cfg):
             trained = _clock(cuda)
             delivery = deliver(trace, budget, times, decisions, b, method, cfg.round_s)
             delivered = time.perf_counter()
-            updates, _ = round_updates(groups, reports, delivery, b.cfg)
+            updates, terms = round_updates(groups, reports, delivery, b.cfg)
             groups.apply(updates, cfg.server_lr)
             if not _all_finite(tensor for group in groups.ids for tensor in groups.state(group).values()):
                 diverged = r
@@ -198,7 +199,14 @@ def run(cfg):
             energy_total["compute"] += compute
             energy_total["transmit"] += delivery.tx_energy_j
             bytes_total.update(delivery.bytes)
-            # Logs.
+            # Logs. The channel statistics are a diagnostic of the first replica group (the only one without faults);
+            # nothing of the run depends on them, so a failure to compute them is reported and the run goes on.
+            try:
+                channels = channel_statistics(terms[min(terms)]) if terms else None
+            except Exception as error:  # noqa: BLE001
+                channels = None
+                if r == 0:
+                    print(f"NOTE: the channel statistics could not be computed ({error!r}); the run is not affected", flush=True)
             losses = [report.train_loss for report in reports.values()]
             round_loss = float(np.mean(losses)) if losses else None
             total_loss += losses
@@ -239,7 +247,7 @@ def run(cfg):
                 "skipped": {reason: skipped.get(reason, 0) for reason in SKIP_REASONS},
                 "battery_min": {kind: min((batteries.share(sid) for sid in roles.members(kind)), default=None) if kind != "B" else None
                                 for kind in CLASSES},
-                "task_loss": round_loss, "wall_s": logged - round_started,
+                "task_loss": round_loss, "channels": channels, "wall_s": logged - round_started,
                 # Where the round's wall time went: local training, the network model (CPU), replay and aggregation, logging.
                 "wall_parts_s": {"train": trained - round_started, "deliver": delivered - trained,
                                  "aggregate": aggregated - delivered, "log": logged - aggregated}})
@@ -266,7 +274,7 @@ def run(cfg):
                     diverged = r
                     break
                 last = evaluated
-            del reports, updates
+            del reports, updates, terms
         final = None
         if diverged is None and b.final_indices != b.curve_indices:
             evaluation_started = time.perf_counter()

@@ -9,7 +9,8 @@ import torch
 import ho_fl.sat.engine as engine
 from ho_fl.aggregation import Update, aggregate, apply
 from ho_fl.io import tensor_hash
-from ho_fl.sat.aggregate import Groups, replica_difference
+from ho_fl.model import register_head
+from ho_fl.sat.aggregate import Groups, Term, channel_statistics, replica_difference
 from ho_fl.sat.backend import SatBackend
 from ho_fl.sat.cli import main as cli_main
 from ho_fl.sat.client import train_participation
@@ -84,6 +85,28 @@ def test_groups_are_copy_on_write():
     assert groups.ids == [0] and groups.group_of == [0, 0, 0, 0] and replica_difference(groups, state) == 0.0
     with pytest.raises(AssertionError):
         groups.split(0, [[0, 1], [2]])
+
+
+# --- the two channels of an update ----------------------------------------------------------------------------------------
+
+def test_channel_statistics_split_the_update_by_channel():
+    """Three participants on a model of two blocks and a head: a backbone satellite (first-order everywhere), a
+    hybrid one with cut 1 and a forward-only one with cut 2 (zeroth-order below the cut, the head first-order)."""
+    register_head(["head.w"], 2)
+    low, high, head = "m.layers.0.w", "m.layers.1.w", "head.w"
+    terms = [Term(0, {low: torch.tensor([3.0, 4.0]), high: torch.tensor([1.0, 0.0]), head: torch.tensor([2.0])}, {}),
+             Term(1, {high: torch.tensor([1.0, 0.0]), head: torch.tensor([2.0])}, {low: torch.tensor([3.0, 4.0])}),
+             Term(2, {head: torch.tensor([2.0])}, {low: torch.tensor([-3.0, 4.0]), high: torch.tensor([0.0, 5.0])})]
+    before = [tensor.clone() for term in terms for part in (term.first_order, term.zeroth_order) for tensor in part.values()]
+    stats = channel_statistics(terms)
+    assert (stats["counted"], stats["blocks"], stats["fo_n"], stats["zo_n"]) == (3, [0, 1, 2], [1, 2, 3], [2, 1, 0])
+    # Block 0: the first-order sum is (3, 4), the zeroth-order sum (0, 8); both are divided by the three participants.
+    assert stats["fo_norm"] == pytest.approx([5 / 3, 2 / 3, 6 / 3]) and stats["zo_norm"] == pytest.approx([8 / 3, 5 / 3, 0.0])
+    assert stats["cos"][0] == pytest.approx(0.8) and stats["cos"][1] == pytest.approx(0.0) and stats["cos"][2] is None
+    # A diagnostic: the terms, which are the participants' own tensors, are left as they were.
+    after = [tensor for term in terms for part in (term.first_order, term.zeroth_order) for tensor in part.values()]
+    assert all(torch.equal(a, b) for a, b in zip(before, after))
+    assert channel_statistics([]) is None and channel_statistics([Term(0, {}, {})]) is None
 
 
 # --- whole runs ----------------------------------------------------------------------------------------------------------
@@ -165,6 +188,25 @@ def test_methods_behave_as_specified(runs):
     # The same satellites take part in the full method and in zeroth-order flooding (same constraints).
     assert [(row["round"], row["sid"]) for row in ledgers["m4"]] == [(row["round"], row["sid"]) for row in ledgers["m7"]]
     assert sum(row["skipped"]["eclipse"] for row in rounds["m7"]) > 0 and all(row["skipped"]["memory"] == 0 for row in rounds["m7"])
+    # Who sends what to which block (``channels`` of a round): blocks 0 to 11 and the head as block 12.
+    for name in METHOD_NAMES:
+        for row in rounds[name]:
+            stats, people, n = row["channels"], row["participants"], row["counted"]
+            assert stats["counted"] == n and stats["blocks"] == list(range(13)) and stats["fo_n"][12] == n and stats["zo_n"][12] == 0
+            assert all(value >= 0 for value in stats["fo_norm"] + stats["zo_norm"]) and stats["cos"][12] is None
+            if name in ("m0", "m2"):      # everybody backpropagates through every block
+                assert stats["fo_n"] == [n] * 13 and stats["zo_n"] == [0] * 13 and stats["cos"] == [None] * 13
+                assert all(value > 0 for value in stats["fo_norm"]) and stats["zo_norm"] == [0.0] * 13
+            elif name == "m4":            # every block forward-only, the head by backpropagation
+                assert stats["fo_n"][:12] == [0] * 12 and stats["zo_n"][:12] == [n] * 12 and stats["cos"] == [None] * 13
+                assert all(value > 0 for value in stats["zo_norm"][:12]) and stats["fo_norm"][:12] == [0.0] * 12
+            else:                         # the full method: the first-order share of a block grows with its height
+                idle = row["cut_histogram"].get("3", 0)
+                assert stats["fo_n"][:3] == [people["B"]] * 3 and stats["zo_n"][:3] == [people["H"] + people["Z"]] * 3
+                assert stats["fo_n"][3:6] == [people["B"] + idle] * 3 and stats["fo_n"][6:12] == [people["B"] + people["H"]] * 6
+                assert stats["zo_n"][6:12] == [people["Z"]] * 6
+                assert all(-1.0 <= value <= 1.0 for value in stats["cos"][:12] if value is not None)
+    assert any(value is not None for row in rounds["m7"] for value in row["channels"]["cos"])
 
 
 def test_runs_are_reproducible_and_depend_on_seed_and_step(make, runs):
