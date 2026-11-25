@@ -24,10 +24,9 @@ ALL_STAGES = [["env"], ["baseline", "tests", "trace", "data"], ["selfcheck"], ["
 
 class FakeProcess:
     pid = 0
-    stdout = iter(())
 
-    def __init__(self, code):
-        self.returncode = code
+    def __init__(self, code, lines=()):
+        self.returncode, self.stdout = code, iter(lines)
 
     def wait(self, timeout=None):
         return self.returncode
@@ -67,7 +66,8 @@ class Colab:
         return next((code for key, code in self.codes.items() if key in shown), 0)
 
     def popen(self, command, **options):
-        return FakeProcess(self.command(command))
+        code = self.command(command)
+        return FakeProcess(code, ["== env ==\n", "dry run output\n", "== smoke ==\n"] if "--tiny" in self.commands[-1] else ())
 
     def run_all(self):
         shell = types.SimpleNamespace(set_custom_exc=lambda kinds, handler: self.handlers.append(handler))
@@ -124,6 +124,8 @@ def test_a_session_runs_the_stages_in_order_and_ends_with_feedback_and_release(t
     printed = capsys.readouterr().out
     assert printed.count("反馈报告：从下一行开始复制") == 1 and printed.count("# 报告正文") == 1 and printed.count("反馈报告：复制到上一行为止") == 1
     assert "Releasing the GPU runtime in 15 seconds" in printed and "\nTrue\n" not in printed
+    # The dry run shows which stage it has reached, and nothing else of its output while it passes.
+    assert "s  env\n" in printed and "s  smoke\n" in printed and "dry run output" not in printed
     titles = [title for title in namespace["STATUS"] if title[0].isdigit()]
     assert [title[0] for title in titles] == list("12345") and all(namespace["STATUS"][title] == "ok" for title in titles)
     session = json.loads((colab.root / "work" / "sat" / "session.json").read_text())
