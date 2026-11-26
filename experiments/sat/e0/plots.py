@@ -270,10 +270,12 @@ def memory_figure(data):
 
 def channel_figures(data):
     """The full method, block by block: who sends which kind of update, and how large the two parts of the update
-    are. Drawn from the longest finished run of the full method on each task that logged the statistics."""
+    are. Drawn from the longest finished run of the full method on each task that logged the statistics, under the
+    rule of the brief and on the usual data: a variant changes who sends what, and has its own figures."""
     result = []
     for task in ("t2", "t1"):
-        runs = [run for run in data.get("runs") or [] if finished(run) and run["task"] == task and run["method"] == "m7" and run.get("channels")]
+        runs = [run for run in data.get("runs") or [] if finished(run) and run["task"] == task and run["method"] == "m7" and run.get("channels")
+                and not run.get("variant")]
         if not runs:
             continue
         run = max(runs, key=lambda entry: entry["rounds"])

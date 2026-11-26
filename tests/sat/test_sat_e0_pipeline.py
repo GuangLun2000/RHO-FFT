@@ -885,5 +885,16 @@ def test_the_figures_of_the_method_study(tmp_path):
     assert len(steps.lines) == 2 and steps.get_ylim() == (-0.05, 1.08) and steps.get_legend() is not None
     # A session without the study draws none of them; one with half of a pair draws what it can.
     assert plots.study_figures(experiments_only()) == []
+    # The figure of the two channels shows the full method under the rule of the brief, not the first variant in
+    # the list: under the step-length search nobody sends a zeroth-order update, and the figure would show none.
+    stats = {"rounds": 144, "blocks": list(range(13)), "fo_norm": [0.004] * 13, "zo_norm": [0.002] * 12 + [0.0], "cos": [0.0] * 12 + [None]}
+    for entry in data["runs"]:
+        if entry["method"] == "m7":
+            share = [0.0] * 13 if entry["variant"] else [0.6] * 12 + [0.0]
+            entry.update(depth=12, channels={**stats, "fo_share": [1 - value for value in share], "zo_share": share})
+    with plots.matplotlib.rc_context(plots.STYLE):
+        (key, _, figure), = plots.channel_figures(data)
+    assert key == "channels_t2" and [round(bar.get_height()) for bar in figure.axes[0].patches[13:]] == [60] * 12 + [0]
     data["runs"] = [entry for entry in data["runs"] if entry["name"] in ("t2-m2", "t2-m7-line")]
+    assert plots.channel_figures(data) == []
     assert [key for key, _, _ in plots.study_figures(data)] == ["study_search", "study_search_steps"]
