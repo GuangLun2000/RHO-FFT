@@ -46,14 +46,14 @@ md(r'''
 
 **实验内容完全由代码决定**（`experiments/sat/e0/e0.py`），本 notebook 不做任何覆写，也**不设时间上限**：不会因为跑得久而跳过或中止任何一次运行。
 
-1. GPU：Runtime → Change runtime type → 选 GPU。建议 G4、L4 或 A100；T4 没有 BF16 加速，Qwen 的运行在上面要几个小时。
+1. GPU：Runtime → Change runtime type → 选 GPU。建议 A100、G4 或 L4；T4 没有 BF16 加速，这里的每次运行在上面要两三个小时。
 2. **Step 0** 取代码 → **Step 1** 安装依赖 → **Step 2** 检查环境。
-3. **Step 3a** 显存 → **Step 3b** 短程运行 → **Step 3c** 一整天的运行。页面实时打印进度：训练每轮一行（带已用时间和预计剩余时间），任何命令 30 秒没有输出时补一行“仍在运行”。
+3. **Step 3** 方法的对照运行：EuroSAT 上 11 次、各 24 个仿真小时。页面实时打印进度：训练每轮一行（带已用时间和预计剩余时间），任何命令 30 秒没有输出时补一行“仍在运行”。
 4. **Step 4** 实验摘要与图：全部 inline 渲染，断开运行时后仍在页面上。
 5. **Step 5** 反馈报告：把两条分隔线之间的内容复制回来。
 6. **Step 6** 打包下载结果；**Step 7** 释放 GPU。
 
-整次会话在 A100 上实测 54 分钟（2026-11-25）；其他 GPU 上未实测，实测值写在 Step 5 的报告里。
+整次会话在 A100 上估计约 1.5 小时：按 2026-11-25 在 A100 上实测的每次运行用时折算，其中几种新的运行没有实测过。实测值写在 Step 5 的报告里。
 
 > **使用方式**：Run All → 等 Step 7 释放 GPU → 复制 Step 5 的报告。任何一格出错，也会先打印已有结果的报告、交出结果包，再释放 GPU。手动点停止只停掉当前这一步，不会释放 GPU：之后手动运行 Step 4–7，就能得到已完成部分的报告并释放。
 ''')
@@ -298,8 +298,8 @@ def sat(*stages):
 GPU_FACTS = ("import torch; p = torch.cuda.get_device_properties(0); major, minor = torch.cuda.get_device_capability(0); "
              "print(f'GPU: {p.name} | {p.total_memory / 1e9:.1f} GB | compute capability {major}.{minor} | torch {torch.__version__}'); "
              "print('NOTE: this GPU is older than the Ampere generation and has no fast path for BF16, the precision of the backbones. "
-             "On a Tesla T4 (session of 2026-11-25) one evaluation of HumAID took 11.6 minutes: expect the Qwen runs of Step 3b "
-             "to take hours. Nothing is stopped for taking long.') if major < 8 else None")
+             "On a Tesla T4 (session of 2026-11-25) a round of the full method on EuroSAT took 55 seconds: expect every run of Step 3 "
+             "to take two to three hours. Nothing is stopped for taking long.') if major < 8 else None")
 sh([PY, "-c", GPU_FACTS], check=False)
 if sat("env") != 0:
     raise RuntimeError("The training interpreter does not see a CUDA device. Send the output above back.")
@@ -308,15 +308,28 @@ if sat("env") != 0:
 # --- Step 3 --------------------------------------------------------------------------------------------------------------
 
 md(r'''
-## Step 3a: 显存——每个分界上一次参与的峰值
+## Step 3: 方法的对照运行（EuroSAT，11 次，各 24 个仿真小时）
 
-对每个分界做一次完整参与（5 步本地训练，批大小 16），记录峰值显存：Qwen 在分界 0、8、16、24、28，ViT 在分界 0、3、6、9、12。页面每测完一项打印一行。
+上一次会话里完整方法始终低于“只让强星训练”，测量指向两件事：聚合时“除以全部参与者人数”把底层的一阶步长缩到约四成；沿随机方向的零阶更新几乎不带方向信息。这一步每次运行只改一处，看每处改动各起多大作用。“一整天”是仿真里的 24 小时（144 轮、25 次评估）。
 
-**Step 3 的参数完全来自代码**，三步都没有时间上限。同一个运行时里重跑时，已经完成的测量和运行直接复用，不会重跑。
+| 运行 | 回答什么 |
+| --- | --- |
+| 只让强星训练 | 完整方法的每个版本都要超过的参照 |
+| 修订后的方法：一阶部分按送来一阶更新的人数平均；推理芯片卫星用前向计算测步长 | 它能不能超过只让强星训练 |
+| 修订后的方法，不用测出的步长 | 步长搜索起多大作用 |
+| 完整方法，实现说明里的规则 | 起点（同一块 GPU 上） |
+| 完整方法，只改除数 | 一阶步长被摊薄的代价 |
+| 完整方法，改除数、不计入随机方向的零阶更新 | 随机方向的零阶更新有没有用 |
+| River 只在推理芯片卫星上：只让强星训练、修订后的方法（用与不用步长）、理想中心化 | 其他卫星的数据能不能进入模型 |
+| 纯零阶泛洪，不计入零阶更新（只训分类头） | 这个方法的准确率里有多少来自分类头 |
+
+**参数完全来自代码**（`experiments/sat/e0/e0.py` 的 `STUDY`），没有时间上限。先跑决定方法的几次，会话中途被停掉时它们的结果已经在了。同一个运行时里重跑时，已经完成的运行直接复用。
+
+服务器步长都取 1，没有选过；评估用验证集，不碰测试集；单种子。同一种子下各次运行共用轨迹、划分、初始模型、受邀名单和每颗卫星的批次。
 ''')
 
 code(r'''
-# Step 3a: peak GPU memory of a participation per cut
+# Step 3: day-long runs of the full method under its variants, next to the backbone-only method
 def run_step(title, *stages):
     # One step of the experiment. Nothing here raises and nothing is stopped for taking long: the pipeline records
     # what failed, and the notebook goes on to the summary, the report and the release of the GPU.
@@ -327,38 +340,7 @@ def run_step(title, *stages):
     print(f"\n{title}: {STATUS[title]} | {(time.time() - started) / 60:.1f} min\n", flush=True)
 
 
-run_step("Step 3a · Peak GPU memory of a participation per cut", "memory")
-''')
-
-md(r'''
-## Step 3b: 短程运行（7 次，各 2 个仿真小时）
-
-一个仿真小时是 6 轮，每轮约 18 颗卫星受邀。
-
-- **EuroSAT（ViT-B/16）**：完整方法、理想中心化、只让强星训练、纯零阶泛洪各一次。
-- **HumAID（Qwen2.5-1.5B）**：完整方法、理想中心化、只让强星训练各一次。
-
-第一次运行会先生成轨迹和数据划分，之后的运行直接复用。页面每轮打印一行，每次评估开始前和结束后各打印一行。
-
-服务器步长都取 1，没有调过，所以这里的准确率不能用来给方法排名；评估用验证集，不碰测试集。
-''')
-
-code(r'''
-# Step 3b: two simulated hours of every implemented method
-run_step("Step 3b · Short runs: two simulated hours each", "smoke")
-''')
-
-md(r'''
-## Step 3c: 一整天的运行（EuroSAT，4 次）
-
-“一整天”是仿真里的 24 小时（144 轮、25 次评估），不是 GPU 上的时间。四种已实现的方法各一次：2 个仿真小时太短，看不出方法之间的差别（例如只让强星训练只用到十分之一的数据，12 轮里显不出来）。
-
-它仍然不是正式结果（步长没选、单种子、验证集），用来回答四件事：四种方法在足够长的时间上各到哪里、EuroSAT 会不会太简单、一次完整运行要多久、同一配置跑两次是否逐位相同。
-''')
-
-code(r'''
-# Step 3c: a whole simulated day of every implemented method on EuroSAT
-run_step("Step 3c · Day-long runs on EuroSAT: every implemented method", "pilot")
+run_step("Step 3 · Method study: day-long runs on EuroSAT", "study")
 ''')
 
 # --- Step 4 --------------------------------------------------------------------------------------------------------------
@@ -367,7 +349,7 @@ md(r'''
 ## Step 4: 实验摘要与图
 
 - **实验摘要卡**：GPU、PyTorch、代码版本、各步骤的状态，以及每次运行的起止准确率和耗时。
-- **图**（inline，同时存入结果包）：各方法的验证准确率随仿真时间的变化；一整天的运行另有每轮训练损失；完整方法里一阶、零阶两条通道对每一层更新的贡献；每个分界的峰值显存。
+- **图**（inline，同时存入结果包）：每一对只差一处的运行画在一起（改除数、步长搜索、River 只在推理芯片卫星上时的全部类别和这一类）；修订后的方法每轮加上了多少个上一轮的更新；完整方法里一阶、零阶两条通道对每一层更新的贡献。早先的测量会话另有显存和每个分界的峰值显存。
 
 > 图里的文字是英文（Colab 的字体没有中文字形），图上方的标题是中文。图只画已经完成的运行；每个数字都在 Step 5 的反馈报告里。
 ''')

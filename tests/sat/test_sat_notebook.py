@@ -22,7 +22,7 @@ spec.loader.exec_module(builder)
 # The record of the environment, the three steps of the experiment (a measurement and two groups of training runs),
 # then the report twice: once for the summary and the figures of Step 4, once more for Step 5, so that the bundle
 # holds the figures. The checks of gate G0 are not part of a Colab session: no dry run, tests, regression, self-check.
-ALL_STAGES = [["env"], ["memory"], ["smoke"], ["pilot"], ["feedback"], ["feedback"]]
+ALL_STAGES = [["env"], ["study"], ["feedback"], ["feedback"]]
 
 
 class FakeProcess:
@@ -100,9 +100,9 @@ class Colab:
 
 
 def builder_stages():
-    """The stages a Colab session calls, as the pipeline names them (``COLAB`` in e0.py)."""
+    """The stages a Colab session calls, as the pipeline names them (``NOTEBOOK`` in e0.py)."""
     source = (REPO / "experiments" / "sat" / "e0" / "e0.py").read_text(encoding="utf-8")
-    return eval(next(line for line in source.splitlines() if line.startswith("COLAB = ")).split("=", 1)[1].split("#")[0])
+    return eval(next(line for line in source.splitlines() if line.startswith("NOTEBOOK = ")).split("=", 1)[1].split("#")[0])
 
 
 def test_the_notebook_on_disk_is_the_generated_one():
@@ -110,7 +110,7 @@ def test_the_notebook_on_disk_is_the_generated_one():
     notebook = json.loads(builder.NOTEBOOK.read_text(encoding="utf-8"))
     assert notebook["nbformat"] == 4 and notebook["metadata"]["accelerator"] == "GPU" and builder.main(["--check"]) == 0
     kinds = [cell["cell_type"] for cell in notebook["cells"]]
-    assert kinds[0] == "markdown" and kinds.count("code") == 11
+    assert kinds[0] == "markdown" and kinds.count("code") == 9
     for index, cell in enumerate(notebook["cells"]):
         if cell["cell_type"] == "code":
             compile("".join(cell["source"]), f"cell {index}", "exec")
@@ -119,22 +119,24 @@ def test_the_notebook_on_disk_is_the_generated_one():
     markdown = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "markdown"]
     headings = [text.splitlines()[0] for text in markdown]
     assert headings[0] == "# RHO-FFT — Google Colab"
-    assert [heading.split(":")[0] for heading in headings[1:]] == [f"## Step {step}" for step in ("0", "1", "2", "3a", "3b", "3c", "4", "5", "6", "7")]
+    assert [heading.split(":")[0] for heading in headings[1:]] == [f"## Step {step}" for step in ("0", "1", "2", "3", "4", "5", "6", "7")]
     firsts = ["".join(cell["source"]).splitlines()[0] for cell in notebook["cells"] if cell["cell_type"] == "code"]
     assert all(first.startswith("# ") for first in firsts) and firsts[-1] == "# Step 7: release the GPU runtime"
     # No forms, no switches and no time budget: what runs is decided by the code the notebook clones.
     code = "\n".join("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code")
     assert not any(word in code for word in ("#@title", "#@param", "BUDGET", "DEADLINE", "--deadline", "--budget", "RUN_", "Timer", "killpg", "HARD_STOP"))
     # One stage of the pipeline per step of the experiment, none of the checks, and no Colab download call.
-    assert [code.count(f', "{stage}")') for stage in builder_stages()] == [1, 1, 1] and "google.colab import files" not in code
-    assert not any(f'"{name}"' in code for name in ("baseline", "tests", "trace", "data", "selfcheck", "t0", "all", "--tiny", "--force"))
+    assert builder_stages() == ("study",) and [code.count(f', "{stage}")') for stage in builder_stages()] == [1] and "google.colab import files" not in code
+    assert not any(f'"{name}"' in code for name in ("baseline", "tests", "trace", "data", "selfcheck", "memory", "smoke", "pilot", "t0", "all", "--tiny", "--force"))
     assert "不设时间上限" in markdown[0] and "Run All" in markdown[0]
     # What the page says a step runs is what the pipeline runs.
     e0_spec = importlib.util.spec_from_file_location("sat_e0_for_notebook", REPO / "experiments" / "sat" / "e0" / "e0.py")
     e0 = importlib.util.module_from_spec(e0_spec)
     e0_spec.loader.exec_module(e0)
-    assert f"## Step 3b: 短程运行（{len(e0.SMOKE)} 次，各 {e0.SMOKE_HOURS:g} 个仿真小时）" in headings
-    assert f"## Step 3c: 一整天的运行（EuroSAT，{len(e0.DAY)} 次）" in headings and {task for _, task, _ in e0.DAY} == {"t2"}
+    assert f"## Step 3: 方法的对照运行（EuroSAT，{len(e0.STUDY)} 次，各 {e0.DAY_HOURS:g} 个仿真小时）" in headings and {task for _, task, _, _ in e0.STUDY} == {"t2"}
+    # The table of the step has a line for every question the runs answer; the page names no run by a code.
+    step = next(text for text in markdown if text.startswith("## Step 3:"))
+    assert step.count("\n| ") == 2 + 8 and not any(code_name in step for code_name in ("m7", "m2", "m4", "fo_mean", "zo_zeroed", "zonly"))
 
 
 def test_a_session_runs_the_steps_in_order_and_ends_with_report_bundle_and_release(tmp_path, monkeypatch, capsys):
@@ -154,8 +156,8 @@ def test_a_session_runs_the_steps_in_order_and_ends_with_report_bundle_and_relea
     drawing = "no finished measurement or run to draw yet" if importlib.util.find_spec("matplotlib") else "the figures could not be drawn"
     assert drawing in printed and "pipeline output" not in printed
     assert "Releasing the GPU runtime in 20 seconds" in printed and "core files present" in printed and "\nTrue\n" not in printed
-    assert printed.index("# Step 3a") < printed.index("# Step 3b") < printed.index("# Step 3c") < printed.index("# Feedback of this session") < printed.index("All steps done")
-    assert [title[:7] for title in namespace["STATUS"]] == ["Step 3a", "Step 3b", "Step 3c"] and set(namespace["STATUS"].values()) == {"ok"}
+    assert printed.index("# Step 3 · Method study") < printed.index("# Feedback of this session") < printed.index("All steps done")
+    assert list(namespace["STATUS"]) == ["Step 3 · Method study: day-long runs on EuroSAT"] and set(namespace["STATUS"].values()) == {"ok"}
     session = json.loads((colab.root / "work" / "sat" / "session.json").read_text())
     assert [step["name"] for step in session["steps"]] == ["code", "environment"] and all(step["gpu"] is False for step in session["steps"])
     assert "budget_hours" not in session and session["repo_ref"] == "main" and len(colab.handlers) == 1
@@ -165,14 +167,13 @@ def test_a_session_runs_the_steps_in_order_and_ends_with_report_bundle_and_relea
 
 
 def test_a_failing_stage_does_not_stop_the_session(tmp_path, monkeypatch, capsys):
-    colab = Colab(tmp_path, monkeypatch, codes={"e0.py smoke": 1})
+    colab = Colab(tmp_path, monkeypatch, codes={"e0.py study": 1})
     namespace = colab.run_all()
-    # The notebook goes on: the pipeline itself skips what builds on the failed stage, and says so in the report.
+    # The notebook goes on: the pipeline records which runs failed, and the report says so.
     assert colab.stages() == ALL_STAGES and colab.events[-1] == "release"
-    status = {title[:7]: state for title, state in namespace["STATUS"].items()}
-    assert status["Step 3a"] == "ok" and status["Step 3b"].startswith("ATTENTION") and status["Step 3c"] == "ok"
+    assert all(state.startswith("ATTENTION") for state in namespace["STATUS"].values()) and len(namespace["STATUS"]) == 1
     printed = capsys.readouterr().out
-    assert "Step 3b · Short runs: two simulated hours each: ATTENTION" in printed and "- Step 3b · Short runs: two simulated hours each: ATTENTION" in printed
+    assert "Step 3 · Method study: day-long runs on EuroSAT: ATTENTION" in printed and "- Step 3 · Method study: day-long runs on EuroSAT: ATTENTION" in printed
 
 
 def test_an_error_prints_the_report_and_releases_the_gpu(tmp_path, monkeypatch, capsys):
