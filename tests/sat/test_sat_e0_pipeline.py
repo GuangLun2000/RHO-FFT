@@ -473,6 +473,10 @@ def test_the_inputs_of_a_run_are_compared_with_the_pinned_hashes():
     # Nothing to compare: a dry run on synthetic assets, and a run that ended before it had read its inputs.
     assert e0.inputs_as_recorded({"task": "t2", "inputs": pinned}, tiny=True) == {"trace": None, "partition": None}
     assert e0.inputs_as_recorded({"task": "t2", "inputs": {}}) == {"trace": None, "partition": None}
+    # A run on the data variant has the partition of that variant, whatever else its variants change.
+    held = {**pinned, "partition_sha256": e0.EXPECTED["partition_sha256"]["t2-zonly-s42"]}
+    assert e0.inputs_as_recorded({"task": "t2", "variant": "zonly,fo_mean,line", "inputs": held}) == {"trace": True, "partition": True}
+    assert e0.inputs_as_recorded({"task": "t2", "variant": "fo_mean", "inputs": held})["partition"] is False
 
 
 # --- reading results --------------------------------------------------------------------------------------------------------
@@ -684,7 +688,14 @@ def test_expected_hashes_and_run_lists():
     assert (reference[e0.T0_REFERENCE["on"]]["final_accuracy_pct"], reference[e0.T0_REFERENCE["off"]]["final_accuracy_pct"]) == (85.99, 85.95)
     assert set(e0.REQUIRES) <= set(e0.STAGES) and all(set(needs) <= set(e0.STAGES) for needs in e0.REQUIRES.values())
     # The notebook has a switch per step. The checks and the HO-FL runs stay callable but are not part of a Colab session.
-    assert tuple(digest.SWITCHES) == e0.COLAB and set(digest.SWITCHES) | set(digest.CHECKS) | {"env", "feedback", "t0"} == set(e0.STAGES) == set(digest.STAGES)
+    assert tuple(digest.SWITCHES) == e0.COLAB and set(digest.SWITCHES) | set(digest.CHECKS) | {"env", "feedback", "t0", *e0.NOTEBOOK} == set(e0.STAGES) == set(digest.STAGES)
+    # The method study: day-long runs whose names are unique, whose variants fit their methods, and which include every
+    # run the report compares. The partition of the data variant is pinned like the usual one.
+    from ho_fl.sat.methods import resolve
+    assert e0.NOTEBOOK == ("study",) and len({name for name, *_ in e0.STUDY}) == len(e0.STUDY) == 11
+    assert all(resolve(method, variant.split(",")) for _, _, method, variant in e0.STUDY) and all(task == "t2" for _, task, _, _ in e0.STUDY)
+    assert set(digest.STUDY_NAMES.values()) == {name for name, *_ in e0.STUDY}
+    assert e0.STUDY[0][0] == digest.STUDY_NAMES["backbone"] and e0.STUDY[1][0] == digest.STUDY_NAMES["new"]   # the deciding runs first
     assert e0.SESSION == tuple(stage for stage in e0.STAGES if stage != "t0")
 
 
@@ -735,3 +746,144 @@ def test_what_the_page_shows_of_a_stage():
     assert e0.verdicts("> item 4: aggregation against the central rule") and e0.clock(125.4) == "2:05" and set(e0.ABOUT) == set(e0.STAGES)
     assert e0.verdicts("Self-check of task t2 (vit)") and e0.verdicts("15 of 15 checks passed") and e0.verdicts("| 4 | a check | FAIL | detail |")
     assert not e0.verdicts("| 4 | a check | pass | detail |") and not e0.verdicts("| 3 | 0.01 (configured) | 64 | 0.99 | 1.00 | 0.95 |")
+
+
+# --- the method study ---------------------------------------------------------------------------------------------------------
+
+CLASSES = ["AnnualCrop", "Forest", "River"]
+
+
+def study_run(name, method, variant, end, held=None, search=None, loss=1.0):
+    """A day-long run of the study as ``read_run`` returns it: the usual fields and what the comparison of variants reads."""
+    record = run(name, "t2", method, day(0.10, end), group="study", variant=variant, classes=CLASSES, per_class=[end, end, held if held is not None else end],
+                 held_out_names=["River"] if "zonly" in variant else None, search=search, turn={"blocks": 0.6, "head": 0.8},
+                 backbone_loss=[loss + 0.001 * (r % 3) for r in range(144)], inputs={"trace_sha256": "8a0e" * 16, "partition_sha256": "47" * 32, "land_source": "global_land_mask"},
+                 inputs_as_recorded={"trace": True, "partition": True})
+    if held is not None:
+        for point in record["curve"]:
+            point["held_out_accuracy"] = held * point["sim_hours"] / 24
+    return record
+
+
+def study_session(**changes):
+    """The Colab session of the method study: the record of the environment and the eleven runs of ``e0.STUDY``."""
+    search = {"rounds": 144, "probed": 140, "reports": 4.0, "examples": 320.0, "cases": {"no previous step": 1, "uphill": 23, "minimum between the probes": 40,
+                                                                                         "minimum beyond the last probe": 80},
+              "alpha": 1.4, "kappa": 0.3, "beta": 0.55, "extended": 110, "beta_first_half": 0.7, "beta_second_half": 0.4,
+              "beta_by_round": [0.55] * 144, "alpha_by_round": [1.4] * 144}
+    unused = {**search, "beta": 0.0, "extended": 0, "beta_first_half": 0.0, "beta_second_half": 0.0, "beta_by_round": [0.0] * 144}
+    ends = {"t2-m2": 0.80, "t2-m7-line": 0.88, "t2-m7-line-zo_zeroed": 0.82, "t2-m7": 0.76, "t2-m7-fo_mean": 0.81, "t2-m7-fo_mean-zo_zeroed": 0.815,
+            "t2z-m2": 0.72, "t2z-m7-line": 0.86, "t2z-m7-line-zo_zeroed": 0.80, "t2z-m0": 0.84, "t2-m4-zo_zeroed": 0.57}
+    held = {"t2z-m2": 0.0, "t2z-m7-line": 0.70, "t2z-m7-line-zo_zeroed": 0.55, "t2z-m0": 0.95}
+    runs = [study_run(name, method, variant, ends[name], held.get(name), search if variant.endswith("line") else unused if "line" in variant else None,
+                      loss=1.0 - ends[name]) for name, _, method, variant in e0.STUDY]
+    base = experiments_only()
+    data = {**base, "plan": list(e0.NOTEBOOK), "stages": {name: base["stages"]["env"] for name in ("env", "study", "feedback")}, "runs": runs, "repeats": [],
+            "memory": {"t1": None, "t2": None}}
+    data.update(changes)
+    return data
+
+
+def test_the_report_of_the_method_study():
+    data = study_session()
+    text = digest.render(data)
+    assert text.startswith("# RHO-FFT 实验反馈：方法的对照实验\n") and "**本次会话只做方法的对照运行：**方法的对照运行完成。" in text
+    assert "显存标定" not in text and "短程运行" not in text and "关卡清单" not in text and "未运行" not in text
+    # Every run is named by what it does, not by a code.
+    assert "- 方法的对照运行（11 次，各 24 个仿真小时）：EuroSAT · 只让强星训练；EuroSAT · 修订后的方法；EuroSAT · 修订后的方法（不用步长搜索）；EuroSAT · 完整方法；" in text
+    assert "EuroSAT · 完整方法（一阶按送来的人数平均，零阶不计入更新）" in text and "EuroSAT（River 只在推理芯片卫星上） · 理想中心化" in text
+    assert "EuroSAT · 纯零阶泛洪（零阶不计入更新，只训分类头）" in text
+    assert digest.describe(data["runs"][0]) == "EuroSAT · 只让强星训练 · 24 个仿真小时"   # a run without a variant reads as before
+    # The questions are the ones of the study, each answered from the runs it compares.
+    replies = dict(digest.answers(data, digest.checklist(data)))
+    assert list(replies) == ["修订后的方法能不能超过只让强星训练？", "只改除数（一阶部分除以送来一阶更新的人数）起多大作用？", "沿随机方向的零阶更新有没有用？",
+                             "让推理芯片卫星测步长有没有用？", "River 只在推理芯片卫星上时，谁学得会这一类？"]
+    assert replies["修订后的方法能不能超过只让强星训练？"] == "结束时修订后的方法 88.0%，只让强星训练 80.0%，原来的完整方法 76.0%。"
+    assert replies["River 只在推理芯片卫星上时，谁学得会这一类？"].startswith("这一类的准确率：修订后的方法 70.0%，不用步长搜索 55.0%，只让强星训练 0.0%，理想中心化 95.0%。")
+    found = {(finding["level"], finding["topic"]): finding["text"] for finding in digest.findings(data)}
+    assert {("note", "聚合规则"), ("note", "随机方向的零阶更新"), ("note", "步长搜索"), ("decide", "方法"), ("note", "只在推理芯片卫星上的数据"), ("note", "纯零阶泛洪")} <= set(found)
+    assert "完整方法结束时 76.0%" in found["note", "聚合规则"] and "→ 81.0%" in found["note", "聚合规则"] and "单种子，服务器步长都取 1、没有选过。" in found["note", "聚合规则"]
+    # The last three of 25 evaluations rising linearly to the end lie 1/24 of the rise below it on average.
+    assert "步长搜索带来 +5.7 个点" in found["note", "步长搜索"] and "144 轮里有 110 轮延长了更新，平均每轮加上 0.55 个上一轮的更新" in found["note", "步长搜索"]
+    decision = found["decide", "方法"]
+    assert "24 次评估里有 24 次高于它" in decision and "是否把修订后的规则定为方法，由你决定" in decision and "原来的完整方法是 76.0%" in decision
+    assert "最后六分之一的轮次里相差 -0.0800" in decision   # the paired training loss of the backbone satellites: 0.12 against 0.20
+    assert "需要你决定的 1 项" in text and "对照运行都完成了。按第 3.2 节定下方法之后" in text
+    headings = [line.split("（")[0] for line in text.splitlines() if line.startswith("### 4.")]
+    assert headings == ["### 4.1 用时", "### 4.2 轨迹与划分", "### 4.3 训练运行", "### 4.4 方法的对照运行：验证准确率"]
+    assert "| EuroSAT · 完整方法（实现说明里的规则） | 15.5 | 21.0 | 32.0 |" in text and "| 运行 | AnnualCrop | Forest | River |" in text
+    assert "耗时" not in {topic for _, topic in levels(data)}   # what the experiments cost was measured by the session before
+    assert "| EuroSAT（River 只在推理芯片卫星上） · 修订后的方法 |" in text and "只在推理芯片卫星上的那一类（结束时）" in text
+    assert "步长搜索（每轮：" in text and "| EuroSAT · 修订后的方法 | 144 | 140 | 4.0 | 320 | 1.40 | 80 | 40 | 23 | 110 | 0.55 | 0.70 / 0.40 |" in text
+    assert "相邻两轮一阶更新之和的方向余弦" in text and "`fo_mean` 每个张量的一阶部分除以送来一阶更新的人数" in text
+    card = digest.card(data)
+    assert "| 方法的对照运行 | 完成 |" in card and "显存标定" not in card and "| EuroSAT · 修订后的方法 · 24 个仿真小时 | 完成 | 10.0 → 88.0 |" in card
+    # A run that is missing leaves its answer open and is listed as such; the others are still compared.
+    partly = study_session()
+    partly["runs"][1] = run("t2-m7-line", "t2", "m7", [0.1], group="study", variant="fo_mean,line", status="FAILED", rounds=0)
+    partly["stages"]["study"] = {"status": "attention", "wall_s": 60.0, "calls": 1, "blocked_by": None}
+    text = digest.render(partly)
+    assert "结束时修订后的方法 未运行，只让强星训练 80.0%" in text and "方法的对照运行有问题（11 次运行里 10 次跑完）" in text
+    assert ("decide", "方法") not in levels(partly) and ("note", "聚合规则") in levels(partly) and ("fix", "运行") in levels(partly)
+    assert "方法的对照运行没有完成（原因见上）" in text
+    # The measurement session is not touched by any of this: its report has neither the questions nor the tables of the study.
+    assert "方法的对照" not in digest.render(experiments_only()) and "修订后的方法" not in digest.render(session())
+
+
+def test_what_the_study_reads_from_a_run(tmp_path):
+    rounds = [{"search": None, "channels": None}] * 2
+    assert e0.search_summary(rounds) is None and e0.turn_summary(rounds, 12) is None and e0.backbone_losses([], 2) is None
+    search = lambda reports, alpha, kappa, beta, case: {"reports": reports, "examples": 80 * reports, "loss": None, "alpha": alpha, "kappa": kappa, "beta": beta, "case": case}  # noqa: E731
+    rounds = [{"search": search(0, 0.0, 0.0, 0.0, "no previous step"), "channels": {"blocks": [0, 12], "fo_cos_prev": [None, None]}},
+              {"search": search(4, 2.0, 0.5, 1.0, "minimum beyond the last probe"), "channels": {"blocks": [0, 12], "fo_cos_prev": [0.4, 0.9]}},
+              {"search": search(2, 0.8, 0.2, 0.6, "minimum between the probes"), "channels": {"blocks": [0, 12], "fo_cos_prev": [0.6, 0.7]}},
+              {"search": search(3, 0.0, 0.1, 0.0, "uphill"), "channels": {"blocks": [0, 12], "fo_cos_prev": [0.2, None]}}]
+    summary = e0.search_summary(rounds)
+    assert (summary["rounds"], summary["probed"], summary["extended"], summary["reports"], summary["examples"]) == (4, 3, 2, 3.0, 240.0)
+    assert summary["alpha"] == pytest.approx(2.8 / 3) and summary["beta"] == pytest.approx(0.4) and summary["beta_by_round"] == [0.0, 1.0, 0.6, 0.0]
+    assert (summary["beta_first_half"], summary["beta_second_half"]) == (pytest.approx(0.5), pytest.approx(0.3)) and summary["cases"]["uphill"] == 1
+    assert e0.turn_summary(rounds, 12) == {"blocks": pytest.approx(0.4), "head": pytest.approx(0.8)}
+    ledger = [{"round": 0, "kind": "B", "train_loss": 2.0}, {"round": 0, "kind": "B", "train_loss": 1.0}, {"round": 0, "kind": "Z", "train_loss": 9.0},
+              {"round": 2, "kind": "B", "train_loss": 0.5}]
+    assert e0.backbone_losses(ledger, 3) == [1.5, None, 0.5]
+    # Two runs of a seed: the difference of the backbone satellites' loss over the last rounds, paired round by round.
+    first, second = {"backbone_loss": [1.0, 0.9, None, 0.7, 0.6, 0.5]}, {"backbone_loss": [1.0, 1.0, 1.0, 0.9, 0.9, 0.7]}
+    difference, error, count = digest.paired_backbone_loss(first, second, share=2)
+    assert (count, difference) == (3, pytest.approx(-(0.2 + 0.3 + 0.2) / 3)) and error > 0
+    assert digest.paired_backbone_loss(first, {"backbone_loss": None}) is None
+
+
+def test_the_figures_of_the_method_study(tmp_path):
+    pytest.importorskip("matplotlib")
+    spec = importlib.util.spec_from_file_location("sat_e0_plots", REPO / "experiments" / "sat" / "e0" / "plots.py")
+    plots = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plots)
+    data = study_session()
+    shown = plots.figures(data, tmp_path / "figures")
+    assert [(path.name, error) for _, path, error in shown] == [(name + ".png", None) for name in (
+        "study_rule", "study_search", "study_held_all", "study_held_class", "study_search_steps")]
+    assert shown[3][0] == "EuroSAT · River 只在推理芯片卫星上：这一类的验证准确率" and all(path.stat().st_size > 10_000 for _, path, _ in shown)
+    assert set(plots.STUDY_SERIES) == {name for name, *_ in e0.STUDY} - {"t2-m4-zo_zeroed"}   # the head-only run is a number, not a curve
+    with plots.matplotlib.rc_context(plots.STYLE):
+        drawn = {key: figure for key, _, figure in plots.study_figures(data)}
+    rule, search, held = (drawn[key].axes[0] for key in ("study_rule", "study_search", "study_held_class"))
+    lines = lambda ax: {line.get_label(): (line.get_color(), line.get_linestyle()) for line in ax.lines if not line.get_label().startswith("_")}  # noqa: E731
+    # A variant has a colour of its own; its control shares it, dashed. The reference methods keep their colours.
+    assert lines(rule) == {"Backbone satellites only": ("#00b894", "-"), "Full method, rule of the brief": ("#257de0", "-"),
+                           "Full method, first-order mean over senders": ("#ec4647", "-"), "the same, zeroth-order part left out": ("#ec4647", "--")}
+    assert lines(search) == {"Backbone satellites only": ("#00b894", "-"), "Revised method (step-length search)": ("#6a4ce2", "-"),
+                             "Revised method, search not used": ("#6a4ce2", "--")}
+    assert lines(held)["Ideal centralised"] == ("#f47230", "-") and held.get_ylabel() == "Validation accuracy on River (%)"
+    assert sorted(text.get_text() for text in search.texts) == ["Backbone only  80.0%", "No search  82.0%", "Revised  88.0%"]
+    assert all(ax.get_legend() is not None and all(text.get_color() == plots.INK for text in ax.texts) for ax in (rule, search, held))
+    # The colours that are hard to tell apart never share a figure: blue with violet, orange with red, aqua with green.
+    apart = [{"#257de0", "#6a4ce2"}, {"#f47230", "#ec4647"}, {"#00b894", "#008a17"}]
+    for figure in drawn.values():
+        used = {line.get_color() for line in figure.axes[0].lines}
+        assert not any(pair <= used for pair in apart)
+    steps = drawn["study_search_steps"].axes[0]
+    assert len(steps.lines) == 2 and steps.get_ylim() == (-0.05, 1.08) and steps.get_legend() is not None
+    # A session without the study draws none of them; one with half of a pair draws what it can.
+    assert plots.study_figures(experiments_only()) == []
+    data["runs"] = [entry for entry in data["runs"] if entry["name"] in ("t2-m2", "t2-m7-line")]
+    assert [key for key, _, _ in plots.study_figures(data)] == ["study_search", "study_search_steps"]

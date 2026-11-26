@@ -37,18 +37,25 @@ AUTHORS_ZO_GAP = 3.32        # points HO-FL loses without its zeroth-order part,
 ROUNDS_PER_DAY, EVALUATIONS_PER_DAY = 144, 25
 REFERENCE_GPU = "RTX PRO 6000"   # Colab's G4: the timings behind every estimate of section 10.4 were measured on it
 STATES = {"ok": "完成", "attention": "有问题", "skipped": "跳过", "running": "被中断"}   # the outcome of a stage, as stages.json has it
-GROUPS = {"smoke": "short", "pilot": "day"}   # the group of runs a stage produces
+GROUPS = {"smoke": "short", "pilot": "day", "study": "study"}   # the group of runs a stage produces
 RUN_STATES = {"COMPLETED": "完成", "DIVERGED": "发散", "FAILED": "失败", "TIMEOUT": "超时", "INTERRUPTED": "被中断", "SKIPPED": "没有开始",
               "NOT RUN": "没有运行", "MISSING": "没有结果"}
 COSINE_SIGMAS = 2.0          # a mean cosine between the two channels counts as different from zero beyond this many standard errors
 
 METHODS = {"m0": "理想中心化", "m2": "只让强星训练", "m4": "纯零阶泛洪", "m7": "完整方法"}
+# The variants of a method (``ho_fl.sat.methods.VARIANTS``) in words, and the combinations that have a name of their own.
+VARIANT_WORDS = {"fo_mean": "一阶按送来的人数平均", "zo_zeroed": "零阶不计入更新", "line": "零阶定步长"}
+NAMED_VARIANTS = {("m7", ("fo_mean", "line")): "修订后的方法", ("m7", ("fo_mean", "line", "zo_zeroed")): "修订后的方法（不用步长搜索）",
+                  ("m4", ("zo_zeroed",)): "纯零阶泛洪（零阶不计入更新，只训分类头）"}
+STUDY_NAMES = {"backbone": "t2-m2", "old": "t2-m7", "mean": "t2-m7-fo_mean", "mean_zeroed": "t2-m7-fo_mean-zo_zeroed", "new": "t2-m7-line",
+               "new_zeroed": "t2-m7-line-zo_zeroed", "head": "t2-m4-zo_zeroed", "held_backbone": "t2z-m2", "held_new": "t2z-m7-line",
+               "held_new_zeroed": "t2z-m7-line-zo_zeroed", "held_ideal": "t2z-m0"}   # the runs of the method study by the role they play
 TASKS = {"t1": "HumAID", "t2": "EuroSAT"}
 MODELS = {"t1": "Qwen2.5-1.5B", "t2": "ViT-B/16"}
 KINDS = {"B": "强星", "H": "GPU 卫星", "Z": "推理芯片卫星"}
 VERDICTS = {"PASS": "通过", "FAIL": "未通过", "NOT RUN": "未运行"}
 STAGES = {"env": "环境记录", "baseline": "基线回归", "tests": "CPU 测试", "trace": "轨迹", "data": "数据与划分",
-          "selfcheck": "正确性检查", "memory": "显存标定", "smoke": "短程运行", "pilot": "一整天的运行",
+          "selfcheck": "正确性检查", "memory": "显存标定", "smoke": "短程运行", "pilot": "一整天的运行", "study": "方法的对照运行",
           "t0": "HO-FL 零阶开关", "feedback": "反馈报告"}
 STEPS = {"code": "取代码", "environment": "建环境", "dry_run": "预演（CPU）"}   # steps of the notebook itself
 SWITCHES = {"memory": "RUN_MEMORY", "smoke": "RUN_SHORT_RUNS", "pilot": "RUN_DAY_RUNS"}   # the steps of the notebook and their switches
@@ -97,9 +104,36 @@ def budget(note):
     return f"预算不够：需要约 {note['needed_min']:.0f} 分钟，只剩 {note['left_min']:.0f} 分钟"
 
 
+def variants_of(run):
+    return [name for name in (run.get("variant") or "").split(",") if name]
+
+
+def method_name(run):
+    """The method of a run in words, with its variants: a name of its own for the combinations that have one."""
+    chosen = tuple(sorted(name for name in variants_of(run) if name in VARIANT_WORDS))
+    base = METHODS.get(run["method"], run["method"])
+    if not chosen:
+        return base
+    return NAMED_VARIANTS.get((run["method"], chosen)) or f"{base}（{'，'.join(VARIANT_WORDS[name] for name in chosen)}）"
+
+
+def task_name(run):
+    """The task of a run; with the data variant, which class or events only the forward-only satellites hold."""
+    name = TASKS.get(run["task"], run["task"])
+    if "zonly" not in variants_of(run):
+        return name
+    held = "、".join(run.get("held_out_names") or []) or "一部分数据"
+    return f"{name}（{held} 只在推理芯片卫星上）"
+
+
 def describe(run):
     """A run in words: task, method, simulated duration."""
-    return f"{TASKS.get(run['task'], run['task'])} · {METHODS.get(run['method'], run['method'])} · {run['hours']:g} 个仿真小时"
+    return f"{task_name(run)} · {method_name(run)} · {run['hours']:g} 个仿真小时"
+
+
+def plan(data):
+    """The steps this session was to run: those of the measurement session unless the data name others."""
+    return tuple(data.get("plan") or SWITCHES)
 
 
 def checked(data):
@@ -258,6 +292,88 @@ def day_facts(data):
     return facts
 
 
+def study_run(data, role):
+    run = find_run(data, STUDY_NAMES[role])
+    return run if run is not None and run.get("group") == "study" and finished(run) and run.get("curve") else None
+
+
+def last_mean(run, count=3):
+    """Mean accuracy of the last evaluations of a run: the quantity the step-size protocol of the brief selects by."""
+    values = [point["accuracy"] for point in run["curve"][-count:]]
+    return statistics.mean(values)
+
+
+def ahead(run, other):
+    """In how many of the evaluations after the start ``run`` is above ``other``, and how many there are."""
+    pairs = [(a["accuracy"], b["accuracy"]) for a, b in zip(run["curve"], other["curve"]) if a["sim_hours"] > 0]
+    return sum(a > b for a, b in pairs), len(pairs)
+
+
+def held_out_at_end(run):
+    return run["curve"][-1].get("held_out_accuracy") if run and run.get("curve") else None
+
+
+def paired_backbone_loss(run, reference, share=6):
+    """Mean difference of the backbone satellites' training loss between two runs of a seed over the last ``1 /
+    share`` of the rounds, with its standard error over the rounds: ``(difference, error, rounds)`` or ``None``.
+    The same satellites train on the same batches in both runs, so the difference is that of the models."""
+    a, b = run.get("backbone_loss"), reference.get("backbone_loss")
+    if not a or not b:
+        return None
+    count = min(len(a), len(b))
+    pairs = [(x, y) for x, y in list(zip(a[:count], b[:count]))[-max(2, count // share):] if x is not None and y is not None]
+    if len(pairs) < 2:
+        return None
+    differences = [x - y for x, y in pairs]
+    return statistics.mean(differences), statistics.stdev(differences) / len(differences) ** 0.5, len(differences)
+
+
+def _study(data, add):
+    """The method study: what each change did to the full method, read off pairs of runs that differ in one thing."""
+    runs = {role: study_run(data, role) for role in STUDY_NAMES}
+    if not any(runs.values()):
+        return
+    end = lambda run: f"{pct(run['curve'][-1]['accuracy'], 1)}%（最后三次评估平均 {pct(last_mean(run), 1)}%）"  # noqa: E731
+    gap = lambda run, other: f"{100 * (last_mean(run) - last_mean(other)):+.1f}"  # noqa: E731
+    caveat = "单种子，服务器步长都取 1、没有选过。"
+    backbone, old, mean, zeroed, new, new_zeroed = (runs[role] for role in ("backbone", "old", "mean", "mean_zeroed", "new", "new_zeroed"))
+    if old and mean:
+        text = (f"只改除数（每个张量的一阶部分除以送来一阶更新的人数，其余不变）：完整方法结束时 {end(old)} → {end(mean)}，最后三次评估平均相差 {gap(mean, old)} 个点。")
+        if backbone:
+            text += f"只让强星训练是 {end(backbone)}；改除数之后与它相差 {gap(mean, backbone)} 个点。"
+        add("note", "聚合规则", text + caveat)
+    if mean and zeroed:
+        add("note", "随机方向的零阶更新", f"在新除数下，把沿随机方向的零阶更新计入模型是 {end(mean)}，不计入是 {end(zeroed)}，相差 {gap(mean, zeroed)} 个点"
+            "（正数表示零阶更新有帮助）。" + caveat)
+    if new:
+        search = new.get("search") or {}
+        text = f"修订后的方法（一阶按送来的人数平均，推理芯片卫星用前向计算测步长）结束时 {end(new)}。"
+        if new_zeroed:
+            text += f"同样的训练、不用测出的步长时是 {end(new_zeroed)}：步长搜索带来 {gap(new, new_zeroed)} 个点。"
+        if search.get("rounds"):
+            text += (f"{search['rounds']} 轮里有 {search['extended']} 轮延长了更新，平均每轮加上 {num(search['beta'])} 个上一轮的更新"
+                     f"（前半程 {num(search['beta_first_half'])}，后半程 {num(search['beta_second_half'])}）；每次搜索平均用到 {num(search['reports'], 1)} 颗推理芯片卫星的 {num(search['examples'], 0)} 个样本。")
+        add("note", "步长搜索", text + caveat)
+        if backbone:
+            wins, count = ahead(new, backbone)
+            verdict = (f"修订后的方法结束时 {end(new)}，只让强星训练 {end(backbone)}，最后三次评估平均相差 {gap(new, backbone)} 个点；{count} 次评估里有 {wins} 次高于它。")
+            loss = paired_backbone_loss(new, backbone)
+            if loss:
+                verdict += f"同一批强星、同一批次上的训练损失，最后六分之一的轮次里相差 {loss[0]:+.4f}（标准误 {loss[1]:.4f}；负数表示修订后的方法更低）。"
+            if old:
+                verdict += f"原来的完整方法是 {end(old)}。"
+            add("decide", "方法", verdict + caveat + "是否把修订后的规则定为方法，由你决定；定下来之后再为各方法选服务器步长。")
+    held = {role: runs[role] for role in ("held_backbone", "held_new", "held_new_zeroed", "held_ideal") if runs[role]}
+    if held:
+        name = "、".join(next(iter(held.values())).get("held_out_names") or []) or "留出的那一类"
+        parts = [f"{method_name(run)}：全部类别 {pct(run['curve'][-1]['accuracy'], 1)}%，{name} {pct(held_out_at_end(run), 1)}%" for run in held.values()]
+        add("note", "只在推理芯片卫星上的数据", f"{name} 的训练样本只在推理芯片卫星上时，结束时的验证准确率：" + "；".join(parts) + "。"
+            "只让强星训练从来没有见过这一类；修订后的方法里，这一类的数据通过分类头的一阶更新和步长搜索进入模型。" + caveat)
+    if runs["head"]:
+        add("note", "纯零阶泛洪", f"纯零阶泛洪不计入零阶更新（各层不动，只有分类头在学）时结束于 {end(runs['head'])}。"
+            "与计入零阶更新的那次运行（2026-11-25 的会话，同一配置）相比，差值就是随机方向的零阶更新在这个方法里的作用。")
+
+
 def hofl_by_seed(data):
     reference = data.get("t0_reference") or {}
     by_seed = {42: {"on": reference.get("on"), "off": reference.get("off"), "source": "11-21 的会话"}}
@@ -338,7 +454,7 @@ def findings(data):
     def add(level, topic, text, action=None):
         found.append({"level": level, "topic": topic, "text": text, "action": action})
 
-    for rule in (_environment, _stage_errors, _baseline, _tests, _inputs, _selfcheck, _estimator, _memory, _runs, _run_inputs, _repeats, _cost, _day_runs, _ordering, _channels, _hofl, _session):
+    for rule in (_environment, _stage_errors, _baseline, _tests, _inputs, _selfcheck, _estimator, _memory, _runs, _run_inputs, _repeats, _cost, _day_runs, _ordering, _channels, _study, _hofl, _session):
         try:
             rule(data, add)
         except Exception as error:   # one rule that cannot read the data must not take the other findings with it
@@ -573,6 +689,8 @@ def _repeats(data, add):
 
 
 def _cost(data, add):
+    if not any(name in plan(data) for name in SWITCHES):
+        return   # the cost of the experiments was measured by the measurement session; the table of the runs has this session's times
     facts, gpu = cost_facts(data), other_gpu(data)
     for task, fact in facts.items():
         run, (low, high) = fact["run"], ASSUMED_DAY_RUN_MIN[task]
@@ -767,6 +885,8 @@ def answers(data, rows):
         sixth = f"理想中心化第 {day['hours']:g} 小时的验证准确率是 {pct(day['ideal'], 1)}%" + (f"，完整方法 {pct(day['full'], 1)}%" if day["full"] is not None else "") + "。"
         sixth += (f"第 {day['saturated_at']:g} 小时就到了 {100 * SATURATION:.0f}%：偏简单，见第 3.2 节。" if day["saturated_at"] is not None
                   else f"步长未调时没有到 {100 * SATURATION:.0f}%，是否太简单等选完步长再看。")
+    if "study" in plan(data) and not any(name in plan(data) for name in SWITCHES):
+        return study_answers(data)
     # The two questions about the checks belong to a session that ran checks.
     result = [("原有的 HO-FL 有没有被改坏？", first), ("卫星部分的代码在真实模型上对不对？", second)] if checked(data) else []
     result += [("每个分界要多少显存？", " ".join(memory) or "未运行。"), ("一次运行要多久，后面的实验要多少 GPU 小时？", " ".join(cost) or "未运行。"),
@@ -776,7 +896,24 @@ def answers(data, rows):
     if hofl is not None:   # only when the HO-FL runs of E0-b were part of this session
         result.append(("HO-FL 里零阶到底有多大作用？", f"{len(hofl['gaps'])} 个种子上，保留零阶比关掉高 {hofl['mean']:+.2f} 个点（标准差 {hofl['sd']:.2f}）；"
                                                        f"作者报告 {AUTHORS_ZO_GAP} 个点。"))
+    if "study" in plan(data):
+        result += study_answers(data)
     return result
+
+
+def study_answers(data):
+    """The questions of the method study, each answered with the accuracies at the end of the two or three runs it
+    compares (the findings carry the rest). "未运行" where a run is missing."""
+    runs = {role: study_run(data, role) for role in STUDY_NAMES}
+    value = lambda role: f"{pct(runs[role]['curve'][-1]['accuracy'], 1)}%" if runs[role] else "未运行"  # noqa: E731
+    held = lambda role: f"{pct(held_out_at_end(runs[role]), 1)}%" if runs[role] and held_out_at_end(runs[role]) is not None else "未运行"  # noqa: E731
+    name = next(("、".join(run.get("held_out_names") or []) for run in runs.values() if run and run.get("held_out_names")), "留出的那一类")
+    return [("修订后的方法能不能超过只让强星训练？", f"结束时修订后的方法 {value('new')}，只让强星训练 {value('backbone')}，原来的完整方法 {value('old')}。"),
+            ("只改除数（一阶部分除以送来一阶更新的人数）起多大作用？", f"完整方法 {value('old')} → {value('mean')}。"),
+            ("沿随机方向的零阶更新有没有用？", f"在新除数下计入 {value('mean')}，不计入 {value('mean_zeroed')}；纯零阶泛洪只训分类头时 {value('head')}。"),
+            ("让推理芯片卫星测步长有没有用？", f"用测出的步长 {value('new')}，不用 {value('new_zeroed')}。"),
+            (f"{name} 只在推理芯片卫星上时，谁学得会这一类？", f"这一类的准确率：修订后的方法 {held('held_new')}，不用步长搜索 {held('held_new_zeroed')}，"
+                                                   f"只让强星训练 {held('held_backbone')}，理想中心化 {held('held_ideal')}。")]
 
 
 # --- the report ---------------------------------------------------------------------------------------------------------
@@ -795,11 +932,13 @@ def next_steps(data, rows, found):
     lines = []
     decisions = sum(finding["level"] == "decide" for finding in found)
     if not checked(data):
-        open_steps = [STAGES[name] for name in SWITCHES if (stages.get(name) or {}).get("status") != "ok"]
+        open_steps = [STAGES[name] for name in plan(data) if (stages.get(name) or {}).get("status") != "ok"]
         if any(finding["level"] == "block" for finding in found):
             lines.append("有必须先修的问题（第 3.1 节）：修改之后只重跑受影响的步骤。")
         elif open_steps:
             lines.append(f"{'、'.join(open_steps)}没有完成（原因见上）。补跑时只打开对应的开关，已完成的步骤不用重跑。")
+        elif "study" in plan(data):
+            lines.append("对照运行都完成了。按第 3.2 节定下方法之后：为各方法选服务器步长，在 HumAID 上重复关键的几次运行，再写其余的对照方法。")
         else:
             lines.append("测量和训练运行都完成了。这些数字填进里程碑报告 `docs/reports/P-S3.md`，用来判定关卡 G0，并按实测耗时安排后面的方法对比实验。")
         if decisions:
@@ -832,7 +971,10 @@ def render(data):
     rows, found = checklist(data), findings(data)
     state, items = gate(rows)
     with_checks = checked(data)
-    add("# RHO-FFT 实验反馈：卫星场景的第一个实验（关卡 G0）\n" if with_checks else "# RHO-FFT 实验反馈：卫星场景的测量与训练运行\n")
+    steps = plan(data)
+    only_study = "study" in steps and not any(name in steps for name in SWITCHES)
+    add("# RHO-FFT 实验反馈：卫星场景的第一个实验（关卡 G0）\n" if with_checks else
+        "# RHO-FFT 实验反馈：方法的对照实验\n" if only_study else "# RHO-FFT 实验反馈：卫星场景的测量与训练运行\n")
     head = [f"生成于 {data['generated_at']}（UTC）"]
     if not data.get("tiny"):
         head += [f"代码 {((env.get('git') or {}).get('head') or '?')[:12]}", f"GPU {env.get('gpu_name') or '?'}", f"torch {env.get('torch') or '?'}"]
@@ -851,8 +993,8 @@ def render(data):
              "OPEN": f"**关卡 G0：还不能判定。** 清单第 {'、'.join(items)} 项没有结果。"}[state])
     else:
         stages = data.get("stages") or {}
-        add("**本次会话只做测量和训练运行：**" + "，".join(f"{STAGES[name]}{STATES.get((stages.get(name) or {}).get('status'), '没有运行')}{done_of(data, name)}"
-                                                    for name in SWITCHES) + "。")
+        add(("**本次会话只做方法的对照运行：**" if only_study else "**本次会话只做测量和训练运行：**")
+            + "，".join(f"{STAGES[name]}{STATES.get((stages.get(name) or {}).get('status'), '没有运行')}{done_of(data, name)}" for name in steps) + "。")
     counts = {level: sum(finding["level"] == level for finding in found) for level in ("block", "fix", "decide")}
     add(f"\n必须先修的 {counts['block']} 项，建议调整的 {counts['fix']} 项，需要你决定的 {counts['decide']} 项（都在第 3 节）。本次会话要回答的问题：\n")
     try:
@@ -866,11 +1008,15 @@ def render(data):
         add(table(["项", "检查", "结论", "依据"], [[item, what, VERDICTS[verdict], evidence] for item, what, verdict, evidence in rows]))
     else:
         add("\n## 2 本次会话的范围\n")
-        add("- 显存标定：Qwen2.5-1.5B 和 ViT-B/16 在每个分界上一次参与的峰值显存。")
-        for group, title in (("short", "短程运行"), ("day", "一整天的运行")):
+        if "memory" in steps:
+            add("- 显存标定：Qwen2.5-1.5B 和 ViT-B/16 在每个分界上一次参与的峰值显存。")
+        for group, title in (("short", "短程运行"), ("day", "一整天的运行"), ("study", "方法的对照运行")):
             runs = [run for run in data.get("runs") or [] if run["group"] == group]
             if runs:
-                add(f"- {title}（{len(runs)} 次，各 {runs[0]['hours']:g} 个仿真小时）：" + "；".join(f"{TASKS.get(run['task'], run['task'])} · {METHODS.get(run['method'], run['method'])}" for run in runs) + "。")
+                add(f"- {title}（{len(runs)} 次，各 {runs[0]['hours']:g} 个仿真小时）：" + "；".join(f"{task_name(run)} · {method_name(run)}" for run in runs) + "。")
+        if only_study:
+            add("- 每一对只差一处的运行回答一个问题：除数、随机方向的零阶更新、步长搜索、只在推理芯片卫星上的数据。同一种子下各次运行共用轨迹、划分、"
+                "初始模型、受邀名单和每颗卫星的批次。")
         add("- 不在会话里的：测试、基线回归、轨迹与数据的核对、真实模型上的正确性检查。它们只确认代码正确，不产生实验数据；"
             "关卡 G0 的清单以里程碑报告 `docs/reports/P-S3.md` 为准。每次运行自己生成轨迹和划分，哈希是否与记录一致见第 4 节。")
     add("\n## 3 发现与建议的调整\n")
@@ -888,7 +1034,8 @@ def render(data):
             add("")
     add("## 4 数据\n")
     number = 0
-    for section in (_section_time, _section_checks, _section_inputs, _section_memory, _section_estimator, _section_runs, _section_day, _section_channels, _section_hofl):
+    for section in (_section_time, _section_checks, _section_inputs, _section_memory, _section_estimator, _section_runs, _section_day, _section_study,
+                    _section_channels, _section_hofl):
         part = []
         try:
             section(data, part.append)
@@ -912,7 +1059,7 @@ def render(data):
     stages = data.get("stages") or {}
     absent = [f"{STAGES[name]}：" + (("尚未开始（中期报告）" if name in pending else "没有打开，或会话在它之前结束") if name not in stages else
                                      f"开始了，但会话在它结束之前被停止{done_of(data, name)}" if stages[name].get("status") == "running" else f"跳过（{why(stages[name])}）")
-              for name in STAGES if name not in ("env", "feedback") and (name in SWITCHES or name in pending or name in stages)
+              for name in STAGES if name not in ("env", "feedback") and (name in steps or name in pending or name in stages)
               and (name not in stages or stages[name].get("status") in ("skipped", "running"))]
     absent += [f"{describe(run)}：{budget(run.get('note'))}" for run in data.get("runs") or [] if run["status"] == "SKIPPED"]
     absent += [f"{describe(run)}：被中断，跑完了 {run['rounds']} 轮" for run in data.get("runs") or [] if run["status"] == "INTERRUPTED"]
@@ -923,6 +1070,11 @@ def render(data):
         add(f"- {line}")
     add("\n## 名称对照\n")
     add("- 方法：" + "；".join(f"`{key}` {value}" for key, value in METHODS.items()) + "。")
+    if any(variants_of(run) for run in data.get("runs") or []):
+        add("- 方法的改动：`fo_mean` 每个张量的一阶部分除以送来一阶更新的人数，而不是全部参与者人数；`zo_zeroed` 零阶部分不计入模型，谁参加、各自算什么都不变；"
+            "`line` 推理芯片卫星不再沿随机方向估计梯度，而是在自己的批次上测三个损失（当前模型、再走一个和两个上一轮的更新之后），"
+            "各副本用汇总的三个数拟合一条抛物线，把本轮更新沿上一轮的更新延长到测出的最低点，最多延长一个上一轮的更新；GPU 卫星分界以下的层不动。"
+            "`zonly` 一类数据只放在推理芯片卫星上。")
     add("- 卫星类别：强星每个轨道面 1 颗，全部层用反向传播；GPU 卫星每面 4 颗，分界以上用反向传播、以下只做前向（零阶）；推理芯片卫星每面 5 颗，全部层只做前向。")
     add("- 分界：从这一层起往上用反向传播（一阶），以下用零阶。Qwen 有 28 层，ViT 有 12 层。")
     add("- 仿真小时：星座里过去的时间，一小时 6 轮；与 GPU 上花的时间无关。")
@@ -1030,6 +1182,8 @@ def _section_inputs(data, add):
 
 
 def _section_memory(data, add):
+    if "memory" not in plan(data) and not any((data.get("memory") or {}).values()):
+        return   # a session that neither planned nor made the measurement has nothing to say about it
     add("### 4.0 一次参与的峰值显存（GB）\n")
     shown = False
     for name, memory in (data.get("memory") or {}).items():
@@ -1112,8 +1266,10 @@ def _section_runs(data, add):
 
 
 def _section_day(data, add):
-    add("### 4.0 一整天的运行：验证准确率（%）随仿真时间的变化\n")
     runs = [run for run in data.get("runs") or [] if run["group"] == "day" and run.get("rounds") and run["curve"]]
+    if "pilot" not in plan(data) and not runs:
+        return
+    add("### 4.0 一整天的运行：验证准确率（%）随仿真时间的变化\n")
     if not runs:
         add("没有运行。\n")
         return
@@ -1132,11 +1288,61 @@ def _section_day(data, add):
         add("")
 
 
+def _section_study(data, add):
+    runs = [run for run in data.get("runs") or [] if run["group"] == "study" and run.get("rounds") and run.get("curve")]
+    if not runs:
+        return
+    add("### 4.0 方法的对照运行：验证准确率（%）随仿真时间的变化\n")
+    hours = sorted({point["sim_hours"] for run in runs for point in run["curve"]})
+    marks = [hour for hour in hours if hour in (2, 4, 8, 12, 16, 20, 24)] or hours[-7:]
+    label = lambda run: f"{task_name(run)} · {method_name(run)}" + ("（实现说明里的规则）" if run["method"] == "m7" and not variants_of(run) else "")  # noqa: E731
+    held = any(held_out_at_end(run) is not None for run in runs)
+    add(table(["运行"] + [f"{hour:g} h" for hour in marks] + ["最后三次评估平均"] + (["只在推理芯片卫星上的那一类（结束时）"] if held else []),
+              [[label(run)] + [pct(accuracy_at(run, hour), 1) for hour in marks] + [pct(last_mean(run), 1)]
+               + ([pct(held_out_at_end(run), 1) if held_out_at_end(run) is not None else ""] if held else []) for run in runs]))
+    add("")
+    classes = next((run["classes"] for run in runs if run.get("classes") and run.get("per_class")), None)
+    if classes:
+        add("结束时各类别的准确率（%）：\n")
+        add(table(["运行"] + list(classes), [[label(run)] + [pct(value, 0) if value is not None else "" for value in run["per_class"]]
+                                             for run in runs if run.get("per_class") and len(run["per_class"]) == len(classes)]))
+        add("")
+    searched = [run for run in runs if run.get("search")]
+    if searched:
+        add("步长搜索（每轮：推理芯片卫星在自己的批次上测当前模型、再走一个和两个上一轮更新之后的损失；汇总后求最低点）：\n")
+        rows = []
+        for run in searched:
+            search = run["search"]
+            cases = search.get("cases") or {}
+            rows.append([label(run), search["rounds"], search["probed"], num(search["reports"], 1), num(search["examples"], 0), num(search["alpha"]),
+                         cases.get("minimum beyond the last probe", 0), cases.get("minimum between the probes", 0), cases.get("uphill", 0),
+                         search["extended"], num(search["beta"]), f"{num(search['beta_first_half'])} / {num(search['beta_second_half'])}"])
+        add(table(["运行", "轮数", "有探测的轮数", "每次搜索的卫星数", "样本数", "最低点（上一轮更新的倍数，平均）", "最低点在两个探测点之外的轮数", "在探测点之间", "往前走损失反而上升",
+                   "延长了更新的轮数", "平均加上的上一轮更新", "前半程 / 后半程"], rows))
+        add("")
+    paired = []
+    for run in runs:
+        reference = study_run(data, "held_backbone" if "zonly" in variants_of(run) else "backbone")
+        fact = paired_backbone_loss(run, reference) if reference and reference is not run else None
+        if fact:
+            paired.append([label(run), f"{fact[0]:+.4f}", f"{fact[1]:.4f}", fact[2]])
+    if paired:
+        add("同一批强星、同一批次上的训练损失，与只让强星训练相比（最后六分之一的轮次，逐轮配对；负数表示更低。这些批次对只让强星训练是它自己反复训练的数据，所以只用来比较完整方法的各个版本）：\n")
+        add(table(["运行", "损失之差", "标准误", "轮数"], paired))
+        add("")
+    turned = [[label(run), num((run.get("turn") or {}).get("blocks")), num((run.get("turn") or {}).get("head"))] for run in runs if run.get("turn")]
+    if turned:
+        add("相邻两轮一阶更新之和的方向余弦（各轮平均；越接近 1，沿上一轮的更新继续走越可能有用）：\n")
+        add(table(["运行", "各层", "分类头"], turned))
+        add("")
+
+
 def _section_channels(data, add):
     longest = {}   # per task and method the run with the most rounds: the day-long one where there is one
     for run in data.get("runs") or []:
-        if finished(run) and run.get("channels") and run["rounds"] > (longest.get((run["task"], run["method"])) or {"rounds": 0})["rounds"]:
-            longest[run["task"], run["method"]] = run
+        key = (run["task"], run["method"], run.get("variant") or "")
+        if finished(run) and run.get("channels") and run["rounds"] > (longest.get(key) or {"rounds": 0})["rounds"]:
+            longest[key] = run
     runs = [(run, channel_facts(run)) for run in longest.values()]
     runs = [(run, facts) for run, facts in runs if any(fact["zo_share"] for fact in facts)]   # the methods that have a zeroth-order channel
     if not runs:
@@ -1164,7 +1370,7 @@ def card(data):
         rows += [["GPU", env.get("gpu_name") or "?"], ["PyTorch", env.get("torch") or "?"], ["代码", f"`{((env.get('git') or {}).get('head') or '?')[:12]}`"]]
     if session.get("elapsed_hours") is not None:
         rows.append(["会话用时", f"{session['elapsed_hours']:.2f} h"])
-    rows += [[STAGES[name], STATES.get((stages.get(name) or {}).get("status"), "没有运行") + done_of(data, name)] for name in SWITCHES]
+    rows += [[STAGES[name], STATES.get((stages.get(name) or {}).get("status"), "没有运行") + done_of(data, name)] for name in plan(data)]
     lines = [table(["项", "值"], rows), ""]
     runs = [run for run in data.get("runs") or [] if run["status"] != "NOT RUN"]
     if runs:

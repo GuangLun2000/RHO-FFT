@@ -129,7 +129,8 @@ def run(cfg):
                   "partition_sha256": b.manifest["partition_sha256"], "manifest_sha256": b.manifest_id,
                   "data_sha256": b.data_sha256, "initial_parameter_sha256": b.initial_hash, "git": git_head(REPO),
                   "evaluation": {"split": b.eval_split, "curve_examples": len(b.curve_indices) if b.curve_indices else b.split_size(b.eval_split),
-                                 "held_out_examples": len(b.held_out_indices) if b.held_out_indices else 0},
+                                 "held_out_examples": len(b.held_out_indices) if b.held_out_indices else 0,
+                                 "held_out_names": (b.manifest.get("held_out") or {}).get("names")},
                   "aggregation": "mean_all: sum over the participants in ascending satellite number, divided by their number"
                                  if method.upstream_rule else
                                  f"first-order sum of a tensor divided by {'its senders' if method.fo_average == 'senders' else 'all participants'}; "

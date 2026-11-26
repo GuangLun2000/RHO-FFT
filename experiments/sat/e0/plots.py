@@ -18,6 +18,11 @@ What the figures keep fixed:
   series apart does not rest on colour alone. Text is never drawn in a series colour.
 - The words inside a figure are English (the fonts of a Colab runtime have no Chinese glyphs); the heading the
   notebook prints above a figure is Chinese, like the rest of the page.
+- In the figures of the method study a variant of the full method has a colour of its own, and its control (the
+  same run with the zeroth-order part left out of the model) shares that colour as a dashed line with hollow
+  markers. The colours drawn together in one figure were checked pair by pair for normal vision and for simulated
+  colour-vision deficiency (OKLab distance; worst pair 10 under deficiency, 23 without, floors 8 and 15); the
+  pairs that fail (blue with violet, orange with red, aqua with green) never share a figure.
 """
 import json
 import sys
@@ -39,6 +44,22 @@ TASK_LABELS = {"t1": "HumAID, Qwen2.5-1.5B", "t2": "EuroSAT, ViT-B/16"}
 TASK_TITLES = {"t1": "HumAID", "t2": "EuroSAT"}
 GROUP_TITLES = {"short": "短程运行", "day": "一整天的运行"}
 FIRST_ORDER, ZEROTH_ORDER = "#257de0", "#f47230"
+# The runs of the method study (``STUDY`` in e0.py): colour, marker, whether it is a control, legend label, label at the line's end.
+STUDY_SERIES = {
+    "t2-m2": ("#00b894", "^", False, "Backbone satellites only", "Backbone only"),
+    "t2-m7": ("#257de0", "o", False, "Full method, rule of the brief", "Original rule"),
+    "t2-m7-fo_mean": ("#ec4647", "v", False, "Full method, first-order mean over senders", "FO mean"),
+    "t2-m7-fo_mean-zo_zeroed": ("#ec4647", "v", True, "the same, zeroth-order part left out", "FO mean, no ZO"),
+    "t2-m7-line": ("#6a4ce2", "X", False, "Revised method (step-length search)", "Revised"),
+    "t2-m7-line-zo_zeroed": ("#6a4ce2", "X", True, "Revised method, search not used", "No search"),
+    "t2z-m2": ("#00b894", "^", False, "Backbone satellites only", "Backbone only"),
+    "t2z-m7-line": ("#6a4ce2", "X", False, "Revised method (step-length search)", "Revised"),
+    "t2z-m7-line-zo_zeroed": ("#6a4ce2", "X", True, "Revised method, search not used", "No search"),
+    "t2z-m0": ("#f47230", "s", False, "Ideal centralised", "Ideal"),
+}
+STUDY_FIGURES = (("study_rule", ("t2-m2", "t2-m7", "t2-m7-fo_mean", "t2-m7-fo_mean-zo_zeroed"), "聚合规则：只改除数，以及不计入随机方向的零阶更新"),
+                 ("study_search", ("t2-m2", "t2-m7-line", "t2-m7-line-zo_zeroed"), "步长搜索：修订后的方法、不用测出的步长、只让强星训练"))
+STUDY_HELD = ("t2z-m2", "t2z-m7-line", "t2z-m7-line-zo_zeroed", "t2z-m0")
 STYLE = {"font.family": "sans-serif", "font.sans-serif": ["Arial", "DejaVu Sans", "Liberation Sans", "Helvetica", "sans-serif"],
          "font.size": 10, "axes.labelsize": 11, "axes.titlesize": 11, "axes.linewidth": 0.8, "axes.edgecolor": INK, "axes.labelcolor": INK,
          "xtick.labelsize": 10, "ytick.labelsize": 10, "xtick.color": INK, "ytick.color": INK, "text.color": INK,
@@ -140,6 +161,81 @@ def curve_figures(data):
     return result
 
 
+def styled_chart(title, ylabel, series, value_format):
+    """One chart of runs told apart by a style of their own. ``series`` is a list of ``(style, hours, values)``
+    with ``style`` an entry of ``STUDY_SERIES``: a control is dashed and has hollow markers."""
+    figure, (ax,) = new_figure(7.4, 4.1)
+    ends = []
+    for (colour, marker, control, label, short), hours, values in series:
+        points = [(hour, value) for hour, value in zip(hours, values) if value is not None]
+        if not points:
+            continue
+        xs, ys = zip(*points)
+        ax.plot(xs, ys, color=colour, label=label, zorder=3, linestyle="--" if control else "-", marker=marker,
+                markerfacecolor="white" if control else colour, markeredgecolor=colour if control else "white", markeredgewidth=1.2 if control else 1.0,
+                markevery=max(1, len(xs) // 25))
+        ends.append((ys[-1], f"{short}  {value_format.format(ys[-1])}"))
+    ax.set_xlabel("Simulated time (hours)")
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=8, integer=True))
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.margins(x=0.02, y=0.08)
+    ax.autoscale_view()
+    ax.set_ylim(*ax.get_ylim())
+    if len(ends) > 1:
+        ax.legend(loc="best")
+    end_labels(ax, ends)
+    figure.subplots_adjust(left=0.095, right=0.76, top=0.92, bottom=0.13)
+    return figure
+
+
+def study_figures(data):
+    """The method study: pairs of runs that differ in one thing, drawn together. Accuracy over simulated time for
+    the change of the divisor and for the step-length search; with one class held by forward-only satellites
+    alone, the accuracy over all classes and on that class; and what the search added round by round."""
+    runs = {run["name"]: run for run in data.get("runs") or [] if run.get("group") == "study" and finished(run) and run.get("curve")}
+    if not runs:
+        return []
+    result = []
+    first = next(iter(runs.values()))
+    where = f"{TASK_LABELS.get(first['task'], first['task'])}, {first['hours']:g} simulated hours, seed 42, server step 1"
+    curve = lambda run, key: ([point["sim_hours"] for point in run["curve"]], [None if point.get(key) is None else 100 * point[key] for point in run["curve"]])  # noqa: E731
+    for key, names, heading in STUDY_FIGURES:
+        chosen = [runs[name] for name in names if name in runs]
+        if len(chosen) >= 2:
+            figure = styled_chart(where, "Validation accuracy (%)", [(STUDY_SERIES[run["name"]], *curve(run, "accuracy")) for run in chosen], "{:.1f}%")
+            result.append((key, f"EuroSAT · {heading}", figure))
+    held = [runs[name] for name in STUDY_HELD if name in runs]
+    if len(held) >= 2:
+        name = ", ".join(held[0].get("held_out_names") or []) or "one class"
+        title = f"{TASK_LABELS.get(held[0]['task'], held[0]['task'])}, {name} held by forward-only satellites alone"
+        figure = styled_chart(title, "Validation accuracy, all classes (%)", [(STUDY_SERIES[run["name"]], *curve(run, "accuracy")) for run in held], "{:.1f}%")
+        result.append(("study_held_all", f"EuroSAT · {name} 只在推理芯片卫星上：全部类别的验证准确率", figure))
+        if any(point.get("held_out_accuracy") is not None for run in held for point in run["curve"]):
+            figure = styled_chart(title, f"Validation accuracy on {name} (%)", [(STUDY_SERIES[run["name"]], *curve(run, "held_out_accuracy")) for run in held], "{:.1f}%")
+            result.append(("study_held_class", f"EuroSAT · {name} 只在推理芯片卫星上：这一类的验证准确率", figure))
+    searched = runs.get("t2-m7-line")
+    values = ((searched or {}).get("search") or {}).get("beta_by_round")
+    if values:
+        colour = STUDY_SERIES["t2-m7-line"][0]
+        per_hour = max(1.0, len(values) / searched["hours"])
+        window = max(1, round(per_hour))
+        hours = [(index + 1) / per_hour for index in range(len(values))]
+        smooth = [sum(values[max(0, index - window + 1):index + 1]) / len(values[max(0, index - window + 1):index + 1]) for index in range(len(values))]
+        figure, (ax,) = new_figure(7.0, 3.6)
+        ax.plot(hours, values, linestyle="none", marker="o", markersize=3.5, color=MUTED, alpha=0.55, label="each round", zorder=2)
+        ax.plot(hours, smooth, color=colour, label=f"mean of the last {window} rounds", zorder=3)
+        ax.set_xlabel("Simulated time (hours)")
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=8, integer=True))
+        ax.set_ylabel("Previous update added (multiples of it)")
+        ax.set_ylim(-0.05, 1.08)
+        ax.set_title("Revised method: what the step-length search of the forward-only satellites added")
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=2)   # below the plot: the points fill all of it
+        figure.subplots_adjust(left=0.10, right=0.97, top=0.91, bottom=0.27)
+        result.append(("study_search_steps", "EuroSAT · 修订后的方法：步长搜索每轮加上了多少个上一轮的更新（0 到 1）", figure))
+    return result
+
+
 def memory_figure(data):
     """Peak GPU memory of one participation at every cut, one panel per model: the cut table of the scenario."""
     measured = [(task, memory) for task, memory in sorted((data.get("memory") or {}).items()) if memory and memory.get("rows")]
@@ -221,7 +317,7 @@ def figures(data, out_dir):
     out_dir.mkdir(parents=True, exist_ok=True)
     shown = []
     with matplotlib.rc_context(STYLE):
-        for build in (curve_figures, channel_figures, memory_figure):
+        for build in (curve_figures, study_figures, channel_figures, memory_figure):
             try:
                 drawn = build(data)
             except Exception as error:  # noqa: BLE001

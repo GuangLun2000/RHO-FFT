@@ -21,18 +21,23 @@ come first, and a stage does not start when a stage it builds on ran and did not
   pilot      a whole simulated day of every implemented method on the vision task: how
              the methods compare once a run is long enough to tell, does EuroSAT saturate
              (gate G3), what does a run cost, does a repeated run reproduce [diagnostic] -> <root>/pilot/
+  study      a whole simulated day of the full method under its variants (first-order mean
+             over the senders, zeroth-order part left out, step-length search), next to the
+             backbone-only method, on the usual data and with one class held by forward-only
+             satellites alone: what to change in the method           [after gate G0]   -> <root>/study/
   t0         HO-FL on AG News with the zeroth-order part on and off, seeds 43 and 44
              (seed 42 comes from the session of 2026-11-21); run on
              2026-11-24 and no longer part of "all"                   [E0-b]            -> <root>/e0b/
   feedback   what the session showed and what should change           -> <root>/feedback/feedback_E0.md, .json, .zip
   all        every stage but t0 in this order (with --tiny: also without tests)
 
-Requirements between the stages: selfcheck and memory need baseline and tests; smoke and pilot also need trace,
-data and selfcheck; pilot needs the two-hour run of the same method to have passed; t0 needs baseline only (it
-runs upstream code). A stage that was never run blocks nothing.
+Requirements between the stages: selfcheck and memory need baseline and tests; smoke, pilot and study also need
+trace, data and selfcheck; pilot needs the two-hour run of the same method to have passed; t0 needs baseline only
+(it runs upstream code). A stage that was never run blocks nothing.
 
-Since 2026-11-25 the Colab session calls only ``memory``, ``smoke`` and ``pilot`` (``COLAB``): the checks passed
-there and the research lead took them out to keep GPU time for measurements and runs. A run builds the trace and
+Since 2026-11-25 a Colab session holds no checks: they passed there and the research lead took them out to keep
+GPU time for measurements and runs. The measurement session called ``memory``, ``smoke`` and ``pilot`` (``COLAB``)
+and ran on that day; the notebook now calls ``study`` (``NOTEBOOK``), and its report is about those runs alone. A run builds the trace and
 its partition itself on first use and records their hashes, which the report compares with expected.json. The
 check stages stay callable, and ``all`` (the local dry run) still goes through every one of them.
 
@@ -95,15 +100,32 @@ SMOKE_HOURS = 2.0
 # so its first rounds also show whether a run reproduces on this GPU.
 DAY = [("t2-m7-day", "t2", "m7"), ("t2-m0-day", "t2", "m0"), ("t2-m2-day", "t2", "m2"), ("t2-m4-day", "t2", "m4")]
 DAY_HOURS, TINY_DAY_HOURS, DAY_FALLBACK_MINUTES = 24.0, 3.0, 10.0
+# The study of the method (after the session of 2026-11-25, in which the full method stayed below the backbone-only
+# one): day-long runs on the vision task, (name, task, method, variants). Each line is one question; the order puts
+# the answers that decide the method first, so a session that is cut short still has them.
+#   backbone satellites only            the reference every variant of the full method has to beat
+#   fo_mean,line                        the revised method: first-order mean over the senders, step-length search
+#   fo_mean,line,zo_zeroed              the same without using the search: what the search adds
+#   (none)                              the full method as the brief defines it: the starting point, on this GPU
+#   fo_mean                             only the divisor changed: what the dilution of the first-order step cost
+#   fo_mean,zo_zeroed                   and the random-direction zeroth-order updates left out: what they add or cost
+#   zonly ...                           one class held by forward-only satellites alone: whose data reach the model
+#   zeroth-order flooding, zo_zeroed    the head alone: how much of the flooding method's accuracy is the head's
+STUDY = [("t2-m2", "t2", "m2", ""), ("t2-m7-line", "t2", "m7", "fo_mean,line"), ("t2-m7-line-zo_zeroed", "t2", "m7", "fo_mean,line,zo_zeroed"),
+         ("t2-m7", "t2", "m7", ""), ("t2-m7-fo_mean", "t2", "m7", "fo_mean"), ("t2-m7-fo_mean-zo_zeroed", "t2", "m7", "fo_mean,zo_zeroed"),
+         ("t2z-m2", "t2", "m2", "zonly"), ("t2z-m7-line", "t2", "m7", "zonly,fo_mean,line"),
+         ("t2z-m7-line-zo_zeroed", "t2", "m7", "zonly,fo_mean,line,zo_zeroed"), ("t2z-m0", "t2", "m0", "zonly"),
+         ("t2-m4-zo_zeroed", "t2", "m4", "zo_zeroed")]
 # E0-b: the settings of the status report of 2026-11-22 (Qwen2.5-1.5B, AG News, Dirichlet 0.5, beta 0.75).
 T0_BASE = {"model": "qwen", "dataset": "ag_news", "partition": "dirichlet_05", "method": "hofl", "beta": 0.75}
 T0_SEEDS = (43, 44)
 T0_MINUTES = {"on": 12.0, "off": 8.0}     # expected duration of a run on the G4, from the measured seconds per round
 T0_REFERENCE = {"file": "experiments/p1/references/v1_1121_qwen.json", "on": "A-b0.75", "off": "B-b0.75"}
-STAGES = ("env", "baseline", "tests", "trace", "data", "selfcheck", "memory", "smoke", "pilot", "t0", "feedback")
+STAGES = ("env", "baseline", "tests", "trace", "data", "selfcheck", "memory", "smoke", "pilot", "study", "t0", "feedback")
 # What "all" runs. The HO-FL runs of E0-b were done on 2026-11-24 (seed 44 completes them); the stage stays callable.
 SESSION = tuple(stage for stage in STAGES if stage != "t0")
-COLAB = ("memory", "smoke", "pilot")   # what the notebook calls, one step each, between "env" and "feedback"
+COLAB = ("memory", "smoke", "pilot")   # the measurement session of gate G0 (run on 2026-11-25): one notebook step each
+NOTEBOOK = ("study",)                  # what the notebook calls now, one step each, between "env" and "feedback"
 # The baseline regression that passed on Colab, and the paths it covers: everything outside the satellite package
 # that a run of upstream HO-FL executes. While these are unchanged on the same GPU and PyTorch, it is not repeated.
 VERIFIED = json.loads((HERE / "verified.json").read_text())
@@ -118,12 +140,14 @@ ABOUT = {"env": "interpreter, packages, GPU and commit of this session",
          "memory": "peak GPU memory of one participation at every cut: 9 measurements on Qwen, then 9 on ViT",
          "smoke": f"{len(SMOKE)} training runs of 2 simulated hours (12 rounds) each: EuroSAT first, then HumAID; one line per round",
          "pilot": f"{len(DAY)} training runs of 24 simulated hours (144 rounds) each on EuroSAT; one line per round",
+         "study": f"{len(STUDY)} training runs of 24 simulated hours (144 rounds) each on EuroSAT: the full method under its variants, "
+                  "next to the backbone-only method, on the usual data and with one class held by forward-only satellites alone; one line per round",
          "t0": "HO-FL on Qwen / AG News with the zeroth-order part on and off, seeds 43 and 44; 160 rounds each",
          "feedback": "the report of this session"}
 HEARTBEAT_S = 30   # the longest a running command stays silent on the page
 REQUIRES = {"selfcheck": ("baseline", "tests", "data"), "memory": ("baseline", "tests"),
             "smoke": ("baseline", "tests", "trace", "data", "selfcheck"), "pilot": ("baseline", "tests", "trace", "data", "selfcheck"),
-            "t0": ("baseline",)}
+            "study": ("baseline", "tests", "trace", "data", "selfcheck"), "t0": ("baseline",)}
 
 
 def now():
@@ -244,8 +268,8 @@ def module(ctx, name, fields, *positional):
     return [ctx.python, "-m", name, *positional, *harness.cli(fields)]
 
 
-def run_fields(ctx, task, method, hours):
-    return {**ctx.sat_fields(task), "method": method, "seed": RUN_SEED, "hours": hours, "eval_split": RUN_SPLIT}
+def run_fields(ctx, task, method, hours, variant=""):
+    return {**ctx.sat_fields(task), "method": method, "seed": RUN_SEED, "hours": hours, "eval_split": RUN_SPLIT, **({"variant": variant} if variant else {})}
 
 
 def run_sat(ctx, label, fields, output, timeout=None):
@@ -621,6 +645,21 @@ def stage_pilot(ctx):
     return all(status == "COMPLETED" for status in statuses.values())
 
 
+def stage_study(ctx):
+    """The runs of ``STUDY``, one after the other. A run that fails does not hold back the others: each answers a
+    question of its own, and the report says which answers are missing."""
+    hours = TINY_DAY_HOURS if ctx.tiny else DAY_HOURS
+    statuses = {}
+    for name, task, method, variant in STUDY:
+        try:
+            statuses[name] = run_sat(ctx, name, run_fields(ctx, task, method, hours, variant), ctx.root / "study" / name)
+        except Exception:   # the pipeline itself broke around this run: say so and go on to the next
+            statuses[name] = "FAILED"
+            say(f"  [{name}] could not be run:\n{traceback.format_exc()}")
+        harness.write_json(ctx.root / "study.json", {"statuses": statuses, "hours": hours})
+    return all(status == "COMPLETED" for status in statuses.values())
+
+
 def t0_runs(ctx):
     runs = []
     for seed in T0_SEEDS:
@@ -657,7 +696,7 @@ def stage_t0(ctx):
 
 # --- feedback ------------------------------------------------------------------------------------------------------------
 
-def read_run(path, name, group, task, method, hours, started, note=None):
+def read_run(path, name, group, task, method, hours, started, note=None, variant=""):
     """A training run as the report reads it: status, curve, who took part, what went unexpectedly, where the wall
     time went. ``started`` says whether its stage ran at all; ``note`` why the run itself was skipped."""
     path = Path(path)
@@ -674,14 +713,22 @@ def read_run(path, name, group, task, method, hours, started, note=None):
         # the run was going on. The run either never got to say so, or says that it was interrupted from outside.
         status = "INTERRUPTED"
     config = harness.read_json(path / "config.json") or {}
-    run = {"name": name, "group": group, "task": task, "method": method, "hours": hours, "status": status, "note": note, "rounds": len(rounds),
+    run = {"name": name, "group": group, "task": task, "method": method, "variant": variant, "hours": hours, "status": status, "note": note, "rounds": len(rounds),
            "depth": config.get("depth"), "cuts": config.get("cuts"), "server_lr": config.get("server_lr"),
            "inputs": {key: config.get(key) for key in ("trace_sha256", "partition_sha256", "land_source")},
            "round_loss": [row["task_loss"] for row in rounds], "channels": channel_summary(rounds),
            "verdict": smoke_verdict(path), "wall_s": (summary or {}).get("wall_s") or meta.get("wall_s"),
            "diverged_round": (summary or {}).get("diverged_round"),
-           "curve": [{"round": row["round"], "sim_hours": row["sim_hours"], "accuracy": row["accuracy"], "macro_f1": row["macro_f1"], "loss": row["loss"]}
-                     for row in evals if not row.get("final")]}
+           "curve": [{"round": row["round"], "sim_hours": row["sim_hours"], "accuracy": row["accuracy"], "macro_f1": row["macro_f1"], "loss": row["loss"],
+                      **({"held_out_accuracy": row["held_out_accuracy"]} if "held_out_accuracy" in row else {})}
+                     for row in evals if not row.get("final")],
+           # What the comparison of variants reads: the classes at the last evaluation, the class only forward-only satellites
+           # hold (data variant), what the step-length search did, how steadily the first-order sum pointed one way, and the
+           # training loss of the backbone satellites round by round (the same satellites and batches in every run of a seed).
+           "classes": config.get("classes"), "held_out_names": (config.get("evaluation") or {}).get("held_out_names"),
+           "per_class": next((row["groups"][0].get("per_class_accuracy") for row in reversed(evals) if not row.get("final") and row.get("groups")), None),
+           "search": search_summary(rounds), "turn": turn_summary(rounds, config.get("depth")),
+           "backbone_loss": backbone_losses(ledger, len(rounds))}
     if not rounds:
         return run
     total = sum(row["wall_s"] for row in rounds)
@@ -711,6 +758,47 @@ def read_run(path, name, group, task, method, hours, started, note=None):
         "participations": (summary or {}).get("participations"), "energy_wh_per_satellite_day": (summary or {}).get("energy_wh_per_satellite_day"),
         "bytes_per_day": (summary or {}).get("bytes_per_day")})
     return run
+
+
+def search_summary(rounds):
+    """What the step-length search of a run did (``rounds.jsonl``, key ``search``): in how many rounds it had probes,
+    how far the pooled minimum lay, how much of the previous step was added, and both round by round. ``None`` for a
+    run without the search."""
+    rows = [row["search"] for row in rounds if row.get("search")]
+    if not rows:
+        return None
+    probed = [row for row in rows if row["reports"]]
+    mean = lambda values: statistics.mean(values) if values else None  # noqa: E731
+    half = len(rows) // 2
+    return {"rounds": len(rows), "probed": len(probed), "reports": mean([row["reports"] for row in probed]), "examples": mean([row["examples"] for row in probed]),
+            "cases": dict(Counter(row["case"] for row in rows)), "alpha": mean([row["alpha"] for row in probed]), "kappa": mean([row["kappa"] for row in probed]),
+            "beta": mean([row["beta"] for row in rows]), "extended": sum(row["beta"] > 0 for row in rows),
+            "beta_first_half": mean([row["beta"] for row in rows[:half]]), "beta_second_half": mean([row["beta"] for row in rows[half:]]),
+            "beta_by_round": [row["beta"] for row in rows], "alpha_by_round": [row["alpha"] for row in rows]}
+
+
+def turn_summary(rounds, depth):
+    """How steadily the first-order sum of a run pointed one way: the mean over its rounds of the cosine between the
+    sum of a round and that of the round before (``channels.fo_cos_prev``), for the transformer blocks and for the
+    head. ``None`` for a run logged without it."""
+    blocks, head = [], []
+    for row in rounds:
+        channels = row.get("channels") or {}
+        for block, value in zip(channels.get("blocks") or [], channels.get("fo_cos_prev") or []):
+            if value is not None:
+                (head if depth is not None and block >= depth else blocks).append(value)
+    if not blocks and not head:
+        return None
+    return {"blocks": statistics.mean(blocks) if blocks else None, "head": statistics.mean(head) if head else None}
+
+
+def backbone_losses(ledger, rounds):
+    """Per round the mean training loss of the backbone satellites that took part (``None`` where none did)."""
+    losses = defaultdict(list)
+    for row in ledger:
+        if row.get("kind") == "B" and row.get("train_loss") is not None:
+            losses[row["round"]].append(row["train_loss"])
+    return [statistics.mean(losses[r]) if losses.get(r) else None for r in range(rounds)] if losses else None
 
 
 def channel_summary(rounds):
@@ -761,7 +849,8 @@ def inputs_as_recorded(run, tiny=False):
     each true, false, or ``None`` where there is nothing to compare (a dry run, a run that did not get that far)."""
     inputs = run.get("inputs") or {}
     trace, partition = inputs.get("trace_sha256"), inputs.get("partition_sha256")
-    pinned = EXPECTED["partition_sha256"].get(f"{run['task']}-base-s{RUN_SEED}")
+    data_variant = "zonly" if "zonly" in (run.get("variant") or "").split(",") else "base"
+    pinned = EXPECTED["partition_sha256"].get(f"{run['task']}-{data_variant}-s{RUN_SEED}")
     return {"trace": None if tiny or trace is None else trace == EXPECTED["trace_sha256"].get(inputs.get("land_source")),
             "partition": None if tiny or partition is None or pinned is None else partition == pinned}
 
@@ -805,14 +894,22 @@ def collect(ctx):
             failure("memory", task, root / "memory" / f"{task}.log")
     pilot = harness.read_json(root / "pilot.json") or {}
     hours = pilot.get("hours") or (TINY_DAY_HOURS if ctx.tiny else DAY_HOURS)
-    groups = [("short", "smoke", SMOKE, SMOKE_HOURS, (harness.read_json(root / "smoke.json") or {}).get("skipped") or {}),
-              ("day", "pilot", DAY, hours, pilot.get("skipped") or {})]
-    for group, stage, specs, duration, skipped in groups:
+    study = harness.read_json(root / "study.json") or {}
+    # A session of the method study reports its own runs only; the measurement session reports the short and the day-long ones.
+    in_study = "study" in stages or "study" in ctx.pending
+    measured = any(name in stages or name in ctx.pending for name in COLAB) or not in_study
+    data["plan"] = [*(COLAB if measured else ()), *(NOTEBOOK if in_study else ())]
+    groups = [("short", "smoke", [(*spec, "") for spec in SMOKE], SMOKE_HOURS, (harness.read_json(root / "smoke.json") or {}).get("skipped") or {}, measured),
+              ("day", "pilot", [(*spec, "") for spec in DAY], hours, pilot.get("skipped") or {}, measured),
+              ("study", "study", STUDY, study.get("hours") or (TINY_DAY_HOURS if ctx.tiny else DAY_HOURS), {}, in_study)]
+    for group, stage, specs, duration, skipped, wanted in groups:
+        if not wanted:
+            continue
         # Only a stage that came to its end went through all its runs: one without a result then is missing, not just not run.
         started = (stages.get(stage) or {}).get("status") in ("ok", "attention")
-        for name, task, method in specs:
+        for name, task, method, variant in specs:
             note = skipped.get(name)
-            run = read_run(root / stage / name, name, group, task, method, duration, started, note)
+            run = read_run(root / stage / name, name, group, task, method, duration, started, note, variant)
             run["inputs_as_recorded"] = inputs_as_recorded(run, ctx.tiny)
             data["runs"].append(run)
             if note is not None and note.get("why") != "short":   # left out for lack of time, not because its short run failed
@@ -894,8 +991,8 @@ def main(argv=None):
     if "all" in stages:
         stages = [stage for stage in SESSION if not (ctx.tiny and stage == "tests")]
     functions = {"env": stage_env, "baseline": stage_baseline, "tests": stage_tests, "trace": stage_trace, "data": stage_data,
-                 "selfcheck": stage_selfcheck, "memory": stage_memory, "smoke": stage_smoke, "pilot": stage_pilot, "t0": stage_t0,
-                 "feedback": stage_feedback}
+                 "selfcheck": stage_selfcheck, "memory": stage_memory, "smoke": stage_smoke, "pilot": stage_pilot, "study": stage_study,
+                 "t0": stage_t0, "feedback": stage_feedback}
     results = {}
     for stage in stages:
         reason, error = None if ctx.force else blocked(ctx.root, stage), None
