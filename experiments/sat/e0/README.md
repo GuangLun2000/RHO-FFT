@@ -93,6 +93,28 @@ satellites point the way the first-order ones do. It is a diagnostic of the firs
 the terms of the aggregation with accumulators of its own: nothing of a run depends on it. The report averages it
 over the rounds by segment of blocks (below the lowest hybrid cut, between the two, above, the head).
 
+## The method study
+
+In the measurement session the full method stayed below the backbone-only method at every evaluation, on both tasks
+(`docs/reports/P-S3.md`, section 4.3). The stage `study` asks what to change in the method, with eleven day-long
+runs on EuroSAT (`STUDY` in `e0.py`). Runs come in pairs that differ in one thing:
+
+| Pair | The one difference | Question |
+| --- | --- | --- |
+| full method, rule of the brief / `fo_mean` | each tensor's first-order sum is divided by the participants that sent one | what the dilution of the first-order step cost |
+| `fo_mean` / `fo_mean,zo_zeroed` | the random-direction zeroth-order updates are left out of the model | do they add anything |
+| `fo_mean,line` / `fo_mean,line,zo_zeroed` | the step lengths the forward-only satellites measure are used or not | what the step-length search adds |
+| `fo_mean,line` / backbone satellites only | | does the revised method beat its simplest reference |
+| the same four on the `zonly` partition, with the ideal method | one class is held by forward-only satellites alone | whose data reach the model |
+| zeroth-order flooding with `zo_zeroed` / the flooding run of 2026-11-25 | only the head is trained | how much of that method's accuracy is the head's |
+
+The variants are switches of a method (`ho_fl/sat/methods.py`), off by default; the default rule and its code path
+are unchanged. The report of a study session (`digest.py`: `_study`, `_section_study`, `study_answers`) is about
+these runs only. The runs that decide the method come first in the list, so a session cut short still has them.
+Reading `rounds.jsonl` of a run with the search: `search.loss` are the pooled losses at 0, 1 and 2 previous updates
+further, `alpha` the fitted minimum (0 to 2), `kappa` how far the fresh first-order step already reaches along the
+previous update, `beta` (0 to 1) what was added.
+
 ## What a stage prints
 
 The page shows where the session is at any moment, and conclusions rather than raw logs:

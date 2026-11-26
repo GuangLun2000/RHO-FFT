@@ -27,15 +27,15 @@ When the brief and the code disagree, the code wins; say so in the report.
 | `ho_fl/sat/links.py`, `energy.py` | Link rates and delays; compute time, power, batteries |
 | `ho_fl/sat/policy.py` | Per-round decision of every satellite: take part or not, cut, expected arrival |
 | `ho_fl/sat/network.py` | Delivery of a round: in-plane sums, laser ring, broadcast, flooding, deadline, bytes |
-| `ho_fl/sat/aggregate.py` | Replica groups (copy-on-write) and the dual-channel aggregation |
-| `ho_fl/sat/methods.py` | The compared methods as sets of switches |
+| `ho_fl/sat/aggregate.py` | Replica groups (copy-on-write), the dual-channel aggregation, the rules of the variants and the step-length search |
+| `ho_fl/sat/methods.py` | The compared methods as sets of switches, and the variants that change single switches (`fo_mean`, `zo_zeroed`, `line`) |
 | `ho_fl/sat/backend.py`, `client.py`, `vision.py` | Model, data and one participation of a satellite; the ViT task |
 | `ho_fl/sat/datasets.py` | HumAID, EuroSAT, the two-level partition and its manifest |
 | `ho_fl/sat/engine.py` | Round loop, evaluation, run directory |
 | `ho_fl/sat/selfcheck.py`, `calibrate.py` | Correctness checks on a loaded model; GPU memory per cut |
 | `ho_fl/sat/cli.py` | Entry points `ho-fl-sat-*` (`tune`, `topology`, `figures` are placeholders) |
 | `ho_fl/sat/testing.py` | Tiny synthetic assets for CPU tests and `--tiny` dry runs |
-| `experiments/sat/e0/` | Pipeline of gate G0 (`e0.py`), its feedback report (`digest.py`) and the figures of a session (`plots.py`); `expected.json` pins the trace and partition hashes |
+| `experiments/sat/e0/` | Pipeline of gate G0 and of the method study that followed it (`e0.py`, stage `study`), its feedback report (`digest.py`) and the figures of a session (`plots.py`); `expected.json` pins the trace and partition hashes |
 | `experiments/p0/` | Baseline regression against the upstream commit (still in use) |
 | `tests/sat/` | Tests of the satellite code; `tests/` holds the upstream equivalence tests |
 | `notebooks/` | The one Colab notebook and `build_notebook.py`, which generates it |
@@ -51,6 +51,20 @@ Files directly in `ho_fl/` fall into two groups:
   `analysis`, `live`, and the pipelines in `experiments/p1/`, `p2/`, `faults/`. Leave them alone and do not read them
   unless a task names them. Two exceptions: `experiments/p1/references/` is the reference of the alignment runs, and
   `tests/test_grid_and_analysis.py` loads `experiments/p1/p1.py`.
+
+## Where the project stands
+
+The measurement session of gate G0 ran on 2026-11-25 (`docs/reports/P-S3.md`). In it the full method stayed below
+the backbone-only method, and the research lead decided to revise the method before the comparison of all methods:
+the experiments exist to show that the proposed method works, so its design comes first. `docs/reports/P-S4.md`
+has the revised design (first-order mean over the senders, step-length search by the forward-only satellites), why
+each part is there, and the study that tests it. Its scope differs from milestone P-S4 of the brief, which has not
+started. Until the lead settles the method, the revised parts are variants, off by default, next to the method of
+the brief; nothing in the brief or the storyline has been rewritten yet.
+
+When a result goes against the proposed method, do not stop at reporting it: find out why from what the runs
+record, propose changes to the method or to the setting with the evidence, the expected effect and the risk of
+each, and say plainly when an idea would backfire. The rules below still hold while doing so.
 
 ## Rules
 

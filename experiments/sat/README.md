@@ -6,7 +6,8 @@ the pipeline script that runs it. Results go to `outputs/sat/` (or the `--root` 
 
 | Directory | Experiment | State |
 | --- | --- | --- |
-| `e0/` | Gate G0: correctness, memory, cost, first learning signals, alignment with HO-FL | ready to run on Colab |
+| `e0/` | Gate G0: correctness, memory, cost, first learning signals, alignment with HO-FL (measurement session run on 2026-11-25) | run |
+| `e0/`, stage `study` | The method study that followed it: the full method under its variants, eleven day-long runs on EuroSAT (`docs/reports/P-S4.md`) | ready to run on Colab |
 | `e1/` ... `e4/` | Main comparison, contributions, faults, topology | follow after gate G0 |
 
 ## How a Colab session works
